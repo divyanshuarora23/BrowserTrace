@@ -202,9 +202,25 @@ def make_working_copy(ct: CollectedTarget, case_dir: Path) -> Path:
 
 
 def verify_case_evidence(conn, case_dir: Path) -> list[dict]:
-    """Re-hash every evidence copy and compare with the stored hash."""
+    """Re-hash every evidence copy and compare with the stored hash.
+
+    Re-running collection/analyze on the same case folder adds a new custody_log row
+    each time without deleting the earlier ones (the custody log is an append-only
+    audit trail). Only the most recent row for a given copy_path reflects what is on
+    disk now, so that is the one checked; older rows would otherwise be reported as
+    "MODIFIED" purely because a later, legitimate collection overwrote the copy.
+    """
     results = []
-    for row in conn.execute("SELECT * FROM custody_log ORDER BY id").fetchall():
+    latest_ids = [r[0] for r in conn.execute(
+        "SELECT MAX(id) FROM custody_log GROUP BY copy_path ORDER BY MAX(id)"
+    ).fetchall()]
+    if not latest_ids:
+        return results
+    rows = conn.execute(
+        f"SELECT * FROM custody_log WHERE id IN ({','.join('?' * len(latest_ids))}) ORDER BY id",
+        latest_ids,
+    ).fetchall()
+    for row in rows:
         row = dict(row)
         path = Path(row["copy_path"])
         if not path.is_absolute():

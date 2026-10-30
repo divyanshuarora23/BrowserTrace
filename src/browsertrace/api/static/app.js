@@ -9,10 +9,11 @@ const KNOWN_BROWSERS = ["Chrome", "Edge", "Firefox", "Brave", "Opera"];
 const SEVERITIES = ["High", "Medium", "Low"];
 const SEV_RANK = { High: 0, Medium: 1, Low: 2 };
 const COLORS = {
-  bar: "#5b8def", barPeak: "#a9c4ff", off: "#a78bfa", offPeak: "#d3c2ff",
-  domain: "#3fb6a8", domainFinding: "#e879f9", others: "#5b6578",
-  grid: "#262d3b", tick: "#a6afbd", label: "#d7dce5",
+  bar: "#2458d1", off: "rgba(36, 88, 209, 0.07)",
+  domain: "#2458d1", others: "#9aa3b2",
+  grid: "#dde1e7", tick: "#5b6372", label: "#16181d",
 };
+const BROWSER_DOTS = { Chrome: "#3b82f6", Edge: "#0ea35a", Firefox: "#e8730f", Brave: "#e0453a", Opera: "#9661f0" };
 const SHORT_TITLES = {
   R001: "File-sharing site visited", R002: "Risky file downloaded", R003: "Off-hours activity",
   R004: "Anti-forensic search", R005: "Share-site visit, then archive download",
@@ -23,15 +24,18 @@ const ATTACK_NAMES = {
   "T1070.004": "File Deletion", T1090: "Proxy", T1074: "Data Staged", T1213: "Data from Information Repositories",
 };
 const TZ_KEY = "browsertrace.tz";
+const THEME_KEY = "browsertrace.theme";
+const TZ_OPTIONS = ["UTC", "Asia/Kolkata"];
 
 const state = {
-  tz: "UTC", caseTz: "UTC", tzOptions: ["UTC"],
-  offset: 0, pageSize: 100, total: 0, grandTotal: 0,
+  tz: "UTC", caseTz: "UTC",
+  pageSize: 100, total: 0, grandTotal: 0,
   filters: {},            // q, browser, type, synced, from, to, hour, domain, finding
   findings: [], rules: {}, offHours: null,
   eventSeverity: new Map(), // event_id -> highest severity of linked findings
-  sevFilter: "All", sort: "severity", activeFinding: null, flashId: null,
+  sevFilter: "All", sort: "severity", selectedFinding: null, flashId: null,
   charts: { hours: null, domains: null }, chartData: null, topN: 15,
+  tab: "overview", loadedTabs: new Set(),
 };
 
 // ---------------------------------------------------------------- DOM helpers
@@ -59,6 +63,17 @@ async function api(path, params) {
   return r.json();
 }
 
+async function apiUpdate(path, body, method = "PUT") {
+  const r = await fetch(path, {
+    method,
+    headers: { Accept: "application/json", "Content-Type": "application/json" },
+    body: body === undefined ? undefined : JSON.stringify(body),
+  });
+  const data = await r.json().catch(() => ({}));
+  if (!r.ok) throw new Error(data.detail || `${path}: HTTP ${r.status}`);
+  return data;
+}
+
 async function copyText(text, btn) {
   try {
     await navigator.clipboard.writeText(text);
@@ -71,6 +86,27 @@ async function copyText(text, btn) {
 function copyButton(text, label) {
   return el("button", { type: "button", class: "ghost small", "aria-label": label || "Copy to clipboard", title: "Copy",
     onclick: (e) => { e.stopPropagation(); copyText(text, e.currentTarget); } }, "Copy");
+}
+
+// ---------------------------------------------------------------- tabs / router
+const TABS = ["overview", "findings", "timeline", "evidence", "report"];
+function goToTab(name, { push = true } = {}) {
+  if (!TABS.includes(name)) name = "overview";
+  state.tab = name;
+  for (const t of TABS) {
+    const btn = document.querySelector(`.tab[data-tab="${t}"]`);
+    const panel = $(`panel-${t}`);
+    const active = t === name;
+    if (btn) btn.setAttribute("aria-selected", String(active));
+    if (panel) { panel.hidden = !active; panel.classList.toggle("active", active); }
+  }
+  if (push && location.hash.slice(1) !== name) location.hash = name;
+  ensureTabLoaded(name);
+}
+function ensureTabLoaded(name) {
+  if (state.loadedTabs.has(name)) return;
+  state.loadedTabs.add(name);
+  if (name === "evidence") loadEvidence().catch((err) => panelError("evidence-body", "evidence", err));
 }
 
 // ---------------------------------------------------------------- time / timezone
@@ -96,8 +132,7 @@ function parts(iso, tz) {
   for (const p of fmt(tz, { year: "numeric", month: "short", day: "2-digit", hour: "2-digit", minute: "2-digit", second: "2-digit" }).formatToParts(d)) o[p.type] = p.value;
   return o;
 }
-// "08 Oct 2026, 11:29:26 IST"
-function fmtFull(iso, tz = state.tz) {
+function fmtFull(iso, tz = state.tz) {   // "08 Oct 2026, 11:29:26 IST"
   const p = parts(iso, tz);
   return p ? `${p.day} ${p.month} ${p.year}, ${p.hour}:${p.minute}:${p.second} ${tzLabel(tz)}` : "(invalid time)";
 }
@@ -107,6 +142,7 @@ function fmtShort(iso, tz = state.tz) {   // "14 Mar 2024, 02:12 IST"
 }
 function fmtDay(iso, tz = state.tz) { const p = parts(iso, tz); return p ? `${Number(p.day)} ${p.month} ${p.year}` : ""; }
 function fmtHM(iso, tz = state.tz) { const p = parts(iso, tz); return p ? `${p.hour}:${p.minute}` : ""; }
+function fmtNum(n) { return (n ?? 0).toLocaleString("en-US"); }
 function utcTitle(iso) { return iso ? `UTC: ${iso}` : ""; }
 
 function tzOffsetMs(utcMs, tz) {
@@ -154,83 +190,177 @@ function urlLine(url) {
   return [dom ? el("b", { class: "dom" }, dom) : null, el("span", { class: "rest" }, dom ? rest : url)];
 }
 
-// ---------------------------------------------------------------- header, timezone switch
+// ---------------------------------------------------------------- transitions (humanized)
+const TRANSITION_CORE = {
+  link: "Followed a link", typed: "Typed in the address bar", auto_bookmark: "Opened from a bookmark",
+  auto_subframe: "Loaded a subframe automatically", manual_subframe: "Navigated in a subframe",
+  generated: "Generated navigation", start_page: "Opened as start page", form_submit: "Submitted a form",
+  reload: "Reloaded the page", keyword: "Searched via address bar keyword", keyword_generated: "Generated keyword search",
+  bookmark: "Opened from a bookmark", embed: "Embedded content", redirect_permanent: "Permanent redirect",
+  redirect_temporary: "Temporary redirect", download: "Download", framed_link: "Followed a link in a frame",
+};
+const TRANSITION_QUAL = {
+  blocked: "blocked", forward_back: "via back/forward", from_address_bar: "from the address bar",
+  home_page: "home page", from_api: "triggered by an extension or API", chain_start: "start of a redirect chain",
+  chain_end: "end of a redirect chain", client_redirect: "client-side redirect", server_redirect: "server-side redirect",
+};
+function humanizeTransition(raw) {
+  if (!raw) return "";
+  const m = /^([a-z_]+)(?:\s*\[([^\]]*)\])?$/.exec(raw.trim());
+  if (!m) return raw;
+  const core = m[1];
+  const quals = m[2] ? m[2].split(",").map((s) => s.trim()).filter(Boolean) : [];
+  const label = TRANSITION_CORE[core] || (core.startsWith("unknown") ? "Unknown navigation type" : core);
+  const extra = quals.map((q) => TRANSITION_QUAL[q] || q).filter((q) => !(core === "typed" && q === "from the address bar"));
+  return extra.length ? `${label} (${extra.join(", ")})` : label;
+}
+
+// ---------------------------------------------------------------- header, theme, timezone
+function applyTheme(theme) {
+  document.documentElement.setAttribute("data-theme", theme);
+  const btn = $("theme-toggle");
+  btn.textContent = theme === "dark" ? "Light" : "Dark";
+  btn.setAttribute("aria-pressed", String(theme === "dark"));
+}
+function initTheme() {
+  let saved = null;
+  try { saved = localStorage.getItem(THEME_KEY); } catch { /* unavailable */ }
+  applyTheme(saved === "dark" ? "dark" : "light");
+  $("theme-toggle").addEventListener("click", () => {
+    const next = document.documentElement.getAttribute("data-theme") === "dark" ? "light" : "dark";
+    applyTheme(next);
+    try { localStorage.setItem(THEME_KEY, next); } catch { /* ignore */ }
+    if (state.chartData) { renderHoursChart(); renderDomainsChart(); }
+  });
+}
+
 async function loadCase() {
   const data = await api("/api/case");
+  state.caseData = data;
   const c = data.case || {};
   state.caseTz = c.host_timezone || "UTC";
+  $("brand-version").textContent = `v${data.tool_version}`;
   const info = $("case-info");
   clear(info);
-  info.append(`Case ${c.case_id || "?"} · examiner ${c.examiner || "?"} · BrowserTrace ${data.tool_version} · `
-    + `rules evaluated in ${c.host_timezone || "UTC"} · ${data.evidence_files.length} evidence file(s)`);
-  const badge = $("verify-badge");
-  const v = data.verification || {};
-  if (v.all_ok) { badge.className = "badge badge-ok"; badge.textContent = "✓ Hashes verified"; }
-  else { badge.className = "badge badge-bad"; badge.textContent = "✗ Hash verification failed"; }
-  badge.title = (v.files || []).map((f) => `${f.status}  ${f.copy_path}`).join("\n");
-  badge.setAttribute("aria-label", `${badge.textContent}. ${(v.files || []).length} evidence file(s) checked.`);
+  info.append(`Case ${c.case_id || "?"} · examiner ${c.examiner || "?"} · rules evaluated in ${state.caseTz} · `
+    + `${data.evidence_files.length} evidence file(s)`);
+  renderEvidenceBadge(data.verification || {}, data.evidence_files || []);
 
-  // Timezone options: the case's analysis timezone, IST and UTC (deduplicated)
-  state.tzOptions = [...new Set([state.caseTz, "Asia/Kolkata", "UTC"])];
   let saved = null;
   try { saved = localStorage.getItem(TZ_KEY); } catch { /* storage unavailable */ }
-  state.tz = state.tzOptions.includes(saved) ? saved : (state.caseTz !== "UTC" ? state.caseTz : "Asia/Kolkata");
+  state.tz = TZ_OPTIONS.includes(saved) ? saved : (state.caseTz === "Asia/Kolkata" ? "Asia/Kolkata" : "UTC");
   renderTzSwitch();
+  renderReportMeta(c, data);
+}
+
+function renderEvidenceBadge(v, files) {
+  const btn = $("evidence-badge-btn");
+  clear(btn);
+  const ok = Boolean(v.all_ok);
+  btn.append(el("span", { class: ok ? "ok" : "bad" }, `${ok ? "✓" : "✗"} ${files.length} evidence file${files.length === 1 ? "" : "s"} ${ok ? "verified" : "FAILED"}`));
+  btn.onclick = (e) => {
+    e.stopPropagation();
+    const existing = $("evidence-popover");
+    if (existing) { existing.remove(); btn.setAttribute("aria-expanded", "false"); return; }
+    btn.setAttribute("aria-expanded", "true");
+    const pop = el("div", { class: "evidence-popover", id: "evidence-popover" },
+      el("ul", {}, ...(v.files || []).map((f) => el("li", {},
+        el("div", {}, f.status === "ok" ? "✓ " : "✗ ", el("code", {}, f.copy_path)),
+      ))));
+    if (!(v.files || []).length) pop.append(el("p", { class: "empty" }, "No evidence files recorded."));
+    $("evidence-badge").append(pop);
+  };
+  document.addEventListener("click", (e) => {
+    const pop = $("evidence-popover");
+    if (pop && !$("evidence-badge").contains(e.target)) { pop.remove(); btn.setAttribute("aria-expanded", "false"); }
+  });
 }
 
 function renderTzSwitch() {
   const box = $("tz-switch");
   clear(box);
-  for (const tz of state.tzOptions) {
-    box.append(el("button", { type: "button", class: "seg", "aria-pressed": tz === state.tz ? "true" : "false",
-      title: tz, onclick: () => setTimezone(tz) }, tzLabel(tz) === tz ? tz : `${tzLabel(tz)}`));
+  for (const tz of TZ_OPTIONS) {
+    box.append(el("button", { type: "button", "aria-pressed": tz === state.tz ? "true" : "false",
+      title: tz, onclick: () => setTimezone(tz) }, tzLabel(tz)));
   }
-  $("tz-note").textContent = state.tz === "UTC" ? "Times shown in UTC." : `Times shown in ${tzLabel(state.tz)} (${state.tz}). Hover a time for UTC.`;
-  $("range-tz").textContent = tzLabel(state.tz);
   $("th-time").textContent = `Time (${tzLabel(state.tz)})`;
   $("export-csv").href = `/api/export.csv?${new URLSearchParams({ tz: state.tz })}`;
   $("export-csv").title = `CSV with UTC times plus a ${state.tz} column`;
+  $("report-export-csv").href = $("export-csv").href;
 }
 
 async function setTimezone(tz) {
   if (tz === state.tz) return;
-  // keep date filters pointing at the same instants, but show them in the new timezone
   state.tz = tz;
   try { localStorage.setItem(TZ_KEY, tz); } catch { /* ignore */ }
   if (state.filters.hour !== undefined) delete state.filters.hour; // hour-of-day differs per timezone
   syncInputsFromFilters();
   renderTzSwitch();
-  renderFindings();
+  renderFindingsList();
+  renderFindingDetail();
+  renderPriorityFindings();
   await Promise.all([loadCharts(), loadEvents()]);
 }
 
-// ---------------------------------------------------------------- stat cards
+function renderReportMeta(c, data) {
+  const dl = $("report-case-meta");
+  clear(dl);
+  const rows = [
+    ["Case ID", c.case_id], ["Examiner", c.examiner], ["Created (UTC)", c.created_utc],
+    ["Tool version", data.tool_version], ["Host timezone", c.host_timezone],
+    ["Evidence files", String(data.evidence_files.length)],
+  ];
+  for (const [k, v] of rows) dl.append(el("dt", {}, k), el("dd", {}, v || "—"));
+}
+
+// ---------------------------------------------------------------- overview stat cards
+function browserIdLabel(name) {
+  return el("span", { class: "b-id" }, el("span", { class: "dot", style: `background:${BROWSER_DOTS[name] || "#7a8699"}` }), name);
+}
+
 async function loadStats() {
   const s = await api("/api/stats");
+  state.stats = s;
   state.grandTotal = s.total_events;
   const cards = $("cards");
   clear(cards);
   const browsers = Object.entries(s.by_browser).sort((a, b) => b[1] - a[1]);
-  const stat = (n, label, hint, extra = {}) => el(extra.onclick ? "button" : "div",
-    { class: "stat", type: extra.onclick ? "button" : null, ...extra },
-    el("span", { class: `n ${extra.ncls || ""}` }, n.toLocaleString("en-US")),
-    el("span", { class: "l" }, label), hint ? el("span", { class: "h" }, hint) : null);
 
-  cards.append(stat(s.total_events, "Total events",
-    browsers.length === 1 ? `all from ${browsers[0][0]}` : browsers.map(([b, n]) => `${b} ${n}`).join(" · ")));
-  if (browsers.length > 1) for (const [b, n] of browsers) cards.append(stat(n, `${b} events`, `${Math.round((100 * n) / s.total_events)}% of events`));
-  for (const sev of SEVERITIES) {
-    const n = s.by_severity[sev] || 0;
-    cards.append(stat(n, `${sev} findings`, "click to filter findings", {
-      ncls: `sev-${sev}`, "aria-pressed": state.sevFilter === sev ? "true" : "false", "data-sev": sev,
-      onclick: () => setSevFilter(state.sevFilter === sev ? "All" : sev),
-    }));
-  }
-  cards.append(stat(s.synced_events, "Synced events",
-    s.synced_events ? "visits made on another signed-in device" : "no synced data loaded"));
-  if (s.recovered_events) cards.append(stat(s.recovered_events, "Recovered events", "partial records"));
+  // 1. Events
+  cards.append(el("div", { class: "card stat" },
+    el("span", { class: "n" }, fmtNum(s.total_events)),
+    el("span", { class: "l" }, "Events"),
+    el("div", { class: "stat-rows" }, ...browsers.map(([b, n]) => el("div", { class: "row" }, browserIdLabel(b), el("b", {}, fmtNum(n)))))));
+
+  // 2. Findings with severity breakdown
+  const totalFindings = SEVERITIES.reduce((a, sev) => a + (s.by_severity[sev] || 0), 0);
+  cards.append(el("div", { class: "card stat" },
+    el("span", { class: "n" }, fmtNum(totalFindings)),
+    el("span", { class: "l" }, "Findings"),
+    el("div", { class: "stat-breakdown" }, ...SEVERITIES.map((sev) => el("button", { type: "button",
+      onclick: () => { setSevFilter(sev); goToTab("findings"); } },
+      el("span", { class: "dot", style: `background:var(--${sev.toLowerCase()})` }), `${sev} ${s.by_severity[sev] || 0}`)))));
+
+  // 3. Browsers
+  cards.append(el("div", { class: "card stat" },
+    el("span", { class: "n" }, fmtNum(browsers.length)),
+    el("span", { class: "l" }, browsers.length === 1 ? "Browser" : "Browsers"),
+    el("div", { class: "stat-rows" }, ...browsers.map(([b, n]) => el("div", { class: "row" }, browserIdLabel(b),
+      el("span", {}, `${Math.round((100 * n) / (s.total_events || 1))}%`))))));
+
+  // 4. Time range
+  const range = s.first_event_utc && s.last_event_utc
+    ? `${fmtDay(s.first_event_utc)} – ${fmtDay(s.last_event_utc)}`
+    : "—";
+  cards.append(el("div", { class: "card stat" },
+    el("span", { class: "n", style: "font-size:16px" }, range),
+    el("span", { class: "l" }, "Time range"),
+    el("div", { class: "stat-rows" },
+      el("div", { class: "row" }, "Synced", el("b", {}, fmtNum(s.synced_events))),
+      s.recovered_events ? el("div", { class: "row" }, "Recovered", el("b", {}, fmtNum(s.recovered_events))) : null)));
 
   const sel = $("f-browser");
+  clear(sel); sel.append(el("option", { value: "" }, "All browsers"));
   for (const [b] of browsers) sel.append(el("option", { value: b }, b));
 }
 
@@ -252,14 +382,14 @@ async function loadFindings() {
     }
   }
   renderSevChips();
-  renderFindings();
+  renderFindingsList();
+  renderPriorityFindings();
 }
 
 function setSevFilter(sev) {
   state.sevFilter = sev;
   renderSevChips();
-  renderFindings();
-  document.querySelectorAll("button.stat[data-sev]").forEach((b) => b.setAttribute("aria-pressed", b.dataset.sev === sev ? "true" : "false"));
+  renderFindingsList();
 }
 
 function renderSevChips() {
@@ -267,7 +397,7 @@ function renderSevChips() {
   clear(box);
   for (const sev of ["All", ...SEVERITIES]) {
     const n = sev === "All" ? state.findings.length : state.findings.filter((f) => f.severity === sev).length;
-    box.append(el("button", { type: "button", class: "chip", "aria-pressed": state.sevFilter === sev ? "true" : "false",
+    box.append(el("button", { type: "button", "aria-pressed": state.sevFilter === sev ? "true" : "false",
       onclick: () => setSevFilter(sev) }, `${sev} ${n}`));
   }
 }
@@ -280,16 +410,20 @@ function boilerplate(ruleId) {
 }
 const ISO_RE = /\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z(?: \(local [^)]*\))?/g;
 const URL_RE = /https?:\/\/[^\s)"'<>]+/g;
+const ESCALATION_RE = /Severity escalated from (\w+) to (\w+) because it happened in the off-hours window \(([^)]*)\)\.?/;
 
 function describe(f) {
   let text = f.reason.replace(/\s+/g, " ").trim();
   const why = boilerplate(f.rule_id);
   for (const s of why) text = text.replace(s, "").trim();
+  let escalation = null;
+  const em = ESCALATION_RE.exec(text);
+  if (em) { escalation = { from: em[1], to: em[2] }; text = text.replace(em[0], "").trim(); }
   const urls = [...new Set(text.match(URL_RE) || [])].map((u) => u.replace(/[.,;]+$/, ""));
   text = text.replace(ISO_RE, (m) => fmtShort(m.slice(0, m.indexOf("Z") + 1)));
   text = text.replace(URL_RE, (u) => splitUrl(u.replace(/[.,;]+$/, "")).dom || u)
     .replace(/\(\s*\)/g, "").replace(/\s+([.,])/g, "$1").trim();
-  return { text, why, urls };
+  return { text, why, urls, escalation };
 }
 
 function summaryLine(f) {
@@ -304,80 +438,162 @@ function summaryLine(f) {
   return `${ev} from ${fmtDay(f.first_time)} ${fmtHM(f.first_time)} to ${fmtDay(f.last_time)} ${fmtHM(f.last_time)} ${tzl}`;
 }
 
-function findingCard(f) {
-  const { text, why, urls } = describe(f);
-  const title = SHORT_TITLES[f.rule_id] || f.name;
-  const desc = el("p", { class: "f-desc", id: `fdesc-${f.id}` }, text);
-  const more = el("button", { type: "button", class: "link-btn", hidden: true, "aria-expanded": "false", "aria-controls": `fdesc-${f.id}`,
-    onclick: (e) => {
-      e.stopPropagation();
-      const open = desc.classList.toggle("expanded");
-      e.currentTarget.textContent = open ? "Show less" : "Show more";
-      e.currentTarget.setAttribute("aria-expanded", String(open));
-    } }, "Show more");
-  requestAnimationFrame(() => { if (desc.scrollHeight > desc.clientHeight + 1) more.hidden = false; });
-
-  const evidence = urls.length ? el("div", { class: "f-evidence" }, ...urls.map((u) => el("div", { class: "ev-line", title: u },
-    el("span", { class: "ev-text" }, ...urlLine(u)), copyButton(u, "Copy URL")))) : null;
-  const whyBox = why.length ? el("details", { class: "why", onclick: (e) => e.stopPropagation() },
-    el("summary", {}, "Why this matters"), el("p", {}, why.join(" "))) : null;
-  const hasAttack = f.attack && f.attack.toLowerCase() !== "none";
-  const jump = () => jumpToFinding(f, card);
-  const card = el("article", { class: `finding ${f.severity}`, tabindex: "0", "data-id": f.id,
-    "aria-label": `${f.severity} finding ${f.rule_id}: ${title}. ${summaryLine(f)}.`,
-    onclick: jump, onkeydown: (e) => { if (e.key === "Enter" && e.target === card) jump(); } },
-    el("div", { class: "f-head" }, el("span", { class: `pill pill-${f.severity}` }, f.severity),
-      el("span", { class: "f-rule" }, f.rule_id), el("span", { class: "f-title" }, title)),
-    el("div", { class: "f-summary" }, summaryLine(f)),
-    desc, more, evidence, whyBox,
-    el("div", { class: "f-foot" },
-      hasAttack ? el("span", { class: "attack", title: "MITRE ATT&CK technique" },
-        `ATT&CK ${f.attack}${ATTACK_NAMES[f.attack] ? ` · ${ATTACK_NAMES[f.attack]}` : ""}`) : el("span"),
-      el("button", { type: "button", class: "jump-btn", onclick: (e) => { e.stopPropagation(); jump(); } },
-        `Jump to ${f.event_count} event${f.event_count === 1 ? "" : "s"}`)));
-  if (state.activeFinding === f.id) card.classList.add("active");
-  return card;
+function attackLink(attack) {
+  const parts2 = attack.split(".");
+  const path = parts2.length > 1 ? `${parts2[0]}/${parts2[1]}` : parts2[0];
+  return el("a", { class: "attack-link", href: `https://attack.mitre.org/techniques/${path}/`, target: "_blank", rel: "noopener noreferrer" },
+    `${attack}${ATTACK_NAMES[attack] ? ` · ${ATTACK_NAMES[attack]}` : ""}`);
 }
 
-function renderFindings() {
+function renderFindingsList() {
   const box = $("findings");
   clear(box);
   let list = state.findings.filter((f) => state.sevFilter === "All" || f.severity === state.sevFilter);
   list = [...list].sort(state.sort === "time"
     ? (a, b) => (a.first_time || "").localeCompare(b.first_time || "") || a.id - b.id
     : (a, b) => SEV_RANK[a.severity] - SEV_RANK[b.severity] || (a.first_time || "").localeCompare(b.first_time || ""));
-  $("findings-count").textContent = state.sevFilter === "All" ? String(state.findings.length) : `${list.length} of ${state.findings.length}`;
-  if (!list.length) { box.append(el("p", { class: "empty" }, state.findings.length ? "No findings with this severity." : "No rule produced a finding.")); return; }
+  if (!list.length) { box.append(el("p", { class: "empty-state" }, state.findings.length ? "No findings match this filter. Clear filter." : "No rule produced a finding.")); return; }
 
-  // group repeated findings of the same rule, placed where the rule first appears
   const groups = new Map();
   for (const f of list) { if (!groups.has(f.rule_id)) groups.set(f.rule_id, []); groups.get(f.rule_id).push(f); }
   for (const [ruleId, items] of groups) {
-    if (items.length === 1) { box.append(findingCard(items[0])); continue; }
+    if (items.length === 1) { box.append(findingRow(items[0])); continue; }
     const sev = items.map((f) => f.severity).sort((a, b) => SEV_RANK[a] - SEV_RANK[b])[0];
-    const open = items.some((f) => f.id === state.activeFinding);
-    const total = items.reduce((n, f) => n + f.event_count, 0);
+    const containsSelected = items.some((f) => f.id === state.selectedFinding);
+    const open = containsSelected;
     box.append(el("details", { class: "group", open },
-      el("summary", {}, el("span", { class: `pill pill-${sev}` }, sev), el("span", { class: "f-rule" }, ruleId),
+      el("summary", { class: "f-row", style: "cursor:pointer" },
+        el("span", { class: `sev-marker ${sev}` }), el("span", { class: "f-rule" }, ruleId),
         el("span", { class: "f-title" }, SHORT_TITLES[ruleId] || items[0].name),
-        el("span", { class: "count-badge", title: `${items.length} findings, ${total} linked events` }, `×${items.length}`)),
-      el("div", { class: "group-body" }, ...items.map(findingCard))));
+        el("span", { class: "count-badge" }, `×${items.length}`)),
+      ...items.map(findingRow)));
   }
 }
 
-async function jumpToFinding(f, card) {
-  state.activeFinding = f.id;
-  document.querySelectorAll(".finding.active").forEach((n) => n.classList.remove("active"));
-  if (card) card.classList.add("active");
+function findingRow(f) {
+  const title = SHORT_TITLES[f.rule_id] || f.name;
+  const row = el("button", { type: "button", class: "f-row", "data-id": f.id,
+    "aria-selected": state.selectedFinding === f.id ? "true" : "false",
+    onclick: () => selectFinding(f.id) },
+    el("span", { class: `sev-marker ${f.severity}` }),
+    el("span", { class: "f-rule" }, f.rule_id),
+    el("span", { class: "f-title" }, title),
+    el("span", { class: "f-time" }, f.first_time ? fmtDay(f.first_time) : ""));
+  return row;
+}
+
+function selectFinding(id) {
+  state.selectedFinding = id;
+  renderFindingsList();
+  renderFindingDetail();
+}
+
+function renderPriorityFindings() {
+  const box = $("priority-list");
+  clear(box);
+  const top = [...state.findings].sort((a, b) => SEV_RANK[a.severity] - SEV_RANK[b.severity]
+    || (a.first_time || "").localeCompare(b.first_time || "")).slice(0, 5);
+  if (!top.length) { box.append(el("p", { class: "empty" }, "No rule produced a finding.")); return; }
+  for (const f of top) {
+    box.append(el("button", { type: "button", class: "priority-row",
+      onclick: () => { goToTab("findings"); selectFinding(f.id); } },
+      el("span", { class: `sev-marker ${f.severity}` }),
+      el("span", { class: "f-rule" }, f.rule_id),
+      el("span", { class: "f-title" }, SHORT_TITLES[f.rule_id] || f.name),
+      el("span", { class: "f-time" }, f.first_time ? fmtDay(f.first_time) : "")));
+  }
+}
+
+function findingReviewEditor(f) {
+  const reviewed = Boolean(f.reviewed_utc);
+  const selectField = (label, name, values, current = "") => {
+    const select = el("select", { name, required: true, "aria-label": label });
+    select.append(el("option", { value: "", selected: !current }, `Select ${label.toLowerCase()}`));
+    for (const value of values) select.append(el("option", { value, selected: value === current }, value));
+    return el("label", { class: "field" }, label, select);
+  };
+  const status = el("p", { class: "review-status", "aria-live": "polite" },
+    reviewed ? `Last saved ${f.reviewed_utc} UTC${f.reviewed_by ? ` by ${f.reviewed_by}` : ""}.` : "No analyst review saved.");
+  const form = el("form", { class: "review-form", onsubmit: (e) => saveFindingReview(e, f, status) },
+    selectField("Analyst risk level", "risk_level", ["Low", "Medium", "High", "Unclear"], f.risk_level || ""),
+    selectField("Outcome", "outcome", ["Concerning", "Benign", "Needs more context"], f.outcome || ""),
+    selectField("Confidence", "confidence", ["Low", "Medium", "High"], f.confidence || ""),
+    el("label", { class: "field" }, "Reviewer (optional)",
+      el("input", { name: "reviewed_by", maxlength: "120", value: f.reviewed_by || "", autocomplete: "name" })),
+    el("label", { class: "field review-rationale" }, "Rationale",
+      el("textarea", { name: "rationale", rows: "3", maxlength: "2000", required: true,
+        placeholder: "Why does this risk level fit the linked evidence?" }, f.rationale || "")),
+    el("div", { class: "review-actions" }, el("button", { type: "submit", class: "primary review-save" }, reviewed ? "Update review" : "Save review"), status));
+  return el("details", { class: "review-editor", open: reviewed },
+    el("summary", {}, reviewed ? `Analyst review: ${f.risk_level} · ${f.outcome}` : "Add analyst review"),
+    el("p", { class: "review-guidance" },
+      "Working guide: Low = isolated or contextual signal; Medium = a specific signal or related signals with context missing; " +
+      "High = multiple independent, time-linked signals. Off-hours activity alone is not High. Use Unclear when evidence is insufficient."),
+    form);
+}
+
+async function saveFindingReview(event, f, status) {
+  event.preventDefault();
+  const form = event.currentTarget;
+  const button = form.querySelector("button[type=submit]");
+  button.disabled = true;
+  status.textContent = "Saving review…";
+  try {
+    const body = Object.fromEntries(new FormData(form).entries());
+    const saved = await apiUpdate(`/api/findings/${f.id}/review`, body);
+    Object.assign(f, saved);
+    renderFindingDetail();
+  } catch (err) {
+    status.textContent = `Could not save review: ${err.message}`;
+    button.disabled = false;
+  }
+}
+
+function renderFindingDetail() {
+  const box = $("finding-detail");
+  clear(box);
+  const f = state.findings.find((x) => x.id === state.selectedFinding);
+  if (!f) { box.append(el("p", { class: "empty-state" }, "Select a finding from the list to see its details.")); return; }
+  const { text, why, urls, escalation } = describe(f);
+  const title = SHORT_TITLES[f.rule_id] || f.name;
+  const hasAttack = f.attack && f.attack.toLowerCase() !== "none";
+
+  box.append(
+    el("div", { class: "detail-head" },
+      el("span", { class: `pill pill-${f.severity}` }, f.severity),
+      el("span", { class: "f-rule" }, f.rule_id),
+      el("h2", {}, title)),
+    el("p", { class: "f-summary" }, summaryLine(f)),
+    escalation ? el("p", { class: "escalation-note" }, `Escalated from ${escalation.from}: off-hours activity.`) : null,
+    el("div", { class: "detail-section" }, el("span", { class: "detail-label" }, "Reason"), el("p", {}, text)),
+    why.length ? el("div", { class: "detail-section" }, el("span", { class: "detail-label" }, "Why this matters"),
+      el("p", {}, why.join(" "))) : null,
+    hasAttack ? el("div", { class: "detail-section" }, el("span", { class: "detail-label" }, "ATT&CK technique"), attackLink(f.attack)) : null,
+    urls.length ? el("div", { class: "detail-section" }, el("span", { class: "detail-label" }, "Linked URLs"),
+      ...urls.map((u) => el("div", { class: "ev-line" }, el("span", { class: "ev-text", title: u }, ...urlLine(u)), copyButton(u, "Copy URL")))) : null,
+    el("div", { class: "detail-section" }, el("span", { class: "detail-label" }, `Linked events (${f.event_count})`),
+      el("table", { class: "linked-events" },
+        el("thead", {}, el("tr", {}, el("th", {}, "Time"), el("th", {}, "Type"), el("th", {}, "URL / term"))),
+        el("tbody", {}, ...(f.events || []).slice(0, 20).map((e) => el("tr", {},
+          el("td", {}, fmtShort(e.timestamp_utc)), el("td", {}, e.event_type),
+          el("td", {}, e.url ? urlLine(e.url) : e.title || ""))))),
+      el("button", { type: "button", class: "primary", style: "margin-top:8px", onclick: () => jumpToFinding(f) },
+        `Show in timeline (${f.event_count} event${f.event_count === 1 ? "" : "s"})`)),
+    findingReviewEditor(f));
+}
+
+async function jumpToFinding(f) {
   state.filters = { finding: f.id };
   state.offset = 0;
   syncInputsFromFilters();
   state.flashId = f.event_ids[0];
+  goToTab("timeline");
   await loadEvents();
-  $("timeline").scrollIntoView({ block: "start" });
+  $("timeline-panel").scrollIntoView({ block: "start" });
 }
 
 // ---------------------------------------------------------------- filters, chips
+let searchDebounce = null;
 function readFilters() {
   const f = {};
   const keep = ["hour", "domain", "finding"];
@@ -416,12 +632,12 @@ function renderChips() {
   const chips = [];
   if (f.finding !== undefined) {
     const fd = state.findings.find((x) => x.id === f.finding);
-    chips.push(el("span", { class: "fchip" }, `Showing ${state.total} linked event${state.total === 1 ? "" : "s"} of ${fd ? `${fd.rule_id} ${SHORT_TITLES[fd.rule_id] || fd.name}` : "finding"}`,
+    chips.push(el("span", { class: "fchip" }, `Showing ${fd ? fd.rule_id : "finding"}'s ${state.total} linked event${state.total === 1 ? "" : "s"}`,
       el("button", { type: "button", class: "fchip-x", "aria-label": "Clear linked events filter", onclick: () => removeFilter("finding") }, "Clear ×")));
   }
   if (f.hour !== undefined) chips.push(chip(`Hour: ${hourLabel(f.hour)}`, "hour"));
   if (f.domain) chips.push(chip(`Domain: ${f.domain}`, "domain"));
-  if (f.q) chips.push(chip(`Text: “${f.q}”`, "q"));
+  if (f.q) chips.push(chip(`Text: "${f.q}"`, "q"));
   if (f.browser) chips.push(chip(`Browser: ${f.browser}`, "browser"));
   if (f.type) chips.push(chip(`Type: ${f.type}`, "type"));
   if (f.synced) chips.push(chip(f.synced === "true" ? "Synced only" : "Local only", "synced"));
@@ -434,28 +650,23 @@ function renderChips() {
 }
 function removeFilter(key) {
   delete state.filters[key];
-  if (key === "finding") { state.activeFinding = null; document.querySelectorAll(".finding.active").forEach((n) => n.classList.remove("active")); }
   state.offset = 0;
   syncInputsFromFilters();
   loadEvents().catch(showError);
 }
 function resetAll() {
-  state.filters = {}; state.offset = 0; state.activeFinding = null;
-  document.querySelectorAll(".finding.active").forEach((n) => n.classList.remove("active"));
+  state.filters = {}; state.offset = 0;
   for (const id of ["f-from", "f-to"]) $(id).classList.remove("invalid");
   syncInputsFromFilters();
   loadEvents().catch(showError);
 }
 function applyFilter(key, value) {
   // a chart click starts a new exploration: it replaces "linked events of finding X"
-  if (state.filters.finding !== undefined) {
-    delete state.filters.finding;
-    state.activeFinding = null;
-    document.querySelectorAll(".finding.active").forEach((n) => n.classList.remove("active"));
-  }
+  delete state.filters.finding;
   state.filters[key] = value;
   state.offset = 0;
-  loadEvents().then(() => $("timeline").scrollIntoView({ block: "start" })).catch(showError);
+  goToTab("timeline");
+  loadEvents().then(() => $("timeline-panel").scrollIntoView({ block: "start" })).catch(showError);
 }
 
 // ---------------------------------------------------------------- timeline
@@ -473,24 +684,23 @@ async function loadEvents() {
     const sev = state.eventSeverity.get(e.event_id);
     const linkedHere = state.filters.finding !== undefined;
     const tags = [];
-    if (e.is_synced) tags.push(el("span", { class: "tag tag-synced", title: "Made on another device signed into the same account (originator_cache_guid)" }, "SYNCED"));
-    if (e.is_recovered) tags.push(el("span", { class: "tag tag-recovered", title: "Recovered record — partial" }, "RECOVERED"));
-    const browserCls = KNOWN_BROWSERS.includes(e.browser) ? `b b-${e.browser}` : "b b-other";
+    if (e.is_synced) tags.push(el("span", { class: "tag", title: "Made on another device signed into the same account" }, "Synced"));
+    if (e.is_recovered) tags.push(el("span", { class: "tag", title: "Recovered record — partial" }, "Recovered"));
     const titleText = e.title || (e.event_type === "visit" ? "(no title)" : "");
+    const humanTransition = humanizeTransition(e.transition);
     const row = el("tr", { class: [sev ? `sev-row-${sev}` : "", linkedHere ? "hl" : ""].join(" ").trim() || null,
       "data-id": e.event_id, tabindex: "0", "aria-label": `${e.event_type} ${fmtFull(e.timestamp_utc)} ${e.url}`,
       onclick: () => openEvent(e.event_id), onkeydown: (ev) => { if (ev.key === "Enter") openEvent(e.event_id); } },
       el("td", { class: "time", title: utcTitle(e.timestamp_utc) }, e.timestamp_utc ? fmtFull(e.timestamp_utc) : "(invalid)",
         sev ? el("span", { class: "sub-line", title: "Linked to a finding" }, `${sev} finding`) : null),
-      el("td", {}, el("span", { class: browserCls }, e.browser), el("span", { class: "sub-line", title: e.profile }, e.profile)),
-      el("td", {}, el("span", { class: `tbadge t-${e.event_type}` }, e.event_type.replace("_", " ")), ...tags,
-        e.transition ? el("span", { class: "sub-line", title: e.transition }, e.transition) : null),
+      el("td", {}, browserIdLabel(e.browser), el("span", { class: "sub-line", title: e.profile }, e.profile)),
+      el("td", {}, el("span", { class: "one-line" }, e.event_type.replace("_", " ")), ...tags,
+        humanTransition ? el("span", { class: "sub-line", title: e.transition }, humanTransition) : null),
       el("td", { title: [e.title, e.detail].filter(Boolean).join("\n") },
         el("span", { class: "one-line" }, titleText),
         e.detail ? el("span", { class: "sub-line" }, e.detail) : null),
       el("td", { class: "url-cell", title: e.url }, el("span", { class: "one-line" }, ...urlLine(e.url))),
       el("td", {}, el("button", { type: "button", class: "ghost small", "aria-label": `Details for event ${e.event_id}`,
-        title: "Full URL, query parameters, source record and navigation chain",
         onclick: (ev) => { ev.stopPropagation(); openEvent(e.event_id); } }, "Details")));
     if (e.event_id === state.flashId) { row.classList.add("flash"); flashRow = row; }
     body.append(row);
@@ -519,10 +729,10 @@ function renderPagers() {
     box.append(el("span", {}, info), el("span", { class: "pager-nav" },
       withSize ? size : null,
       el("button", { type: "button", class: "ghost small", disabled: page <= 1, "aria-label": "Previous page",
-        onclick: () => { state.offset = Math.max(0, state.offset - state.pageSize); loadEvents().then(() => id === "pager-bottom" && $("timeline").scrollIntoView({ block: "start" })).catch(showError); } }, "‹ Prev"),
+        onclick: () => { state.offset = Math.max(0, state.offset - state.pageSize); loadEvents().then(() => id === "pager-bottom" && $("timeline-panel").scrollIntoView({ block: "start" })).catch(showError); } }, "‹ Prev"),
       el("span", {}, `Page ${page} of ${pages}`),
       el("button", { type: "button", class: "ghost small", disabled: page >= pages, "aria-label": "Next page",
-        onclick: () => { state.offset += state.pageSize; loadEvents().then(() => id === "pager-bottom" && $("timeline").scrollIntoView({ block: "start" })).catch(showError); } }, "Next ›")));
+        onclick: () => { state.offset += state.pageSize; loadEvents().then(() => id === "pager-bottom" && $("timeline-panel").scrollIntoView({ block: "start" })).catch(showError); } }, "Next ›")));
   }
 }
 
@@ -548,6 +758,12 @@ async function openEvent(id) {
   const e = data.event;
   const decoded = safeDecode(e.url || "");
   const content = el("div", {});
+  content.append(el("h3", {}, "Event"), kv([
+    ["Time (local)", el("span", { title: utcTitle(e.timestamp_utc) }, e.timestamp_utc ? fmtFull(e.timestamp_utc) : "(invalid)")],
+    ["Time (UTC)", el("code", {}, e.timestamp_utc)],
+    ["Browser", el("span", {}, browserIdLabel(e.browser), " ", e.browser_version || "", " · ", e.profile)],
+    ["Type", e.event_type],
+  ]));
   content.append(el("h3", {}, "URL"),
     el("div", { class: "copy-row" }, el("div", { class: "url-box mono" }, decoded || "—"), e.url ? copyButton(e.url, "Copy URL") : null));
   let params = [];
@@ -556,61 +772,63 @@ async function openEvent(id) {
     content.append(el("h3", {}, `Query parameters (${params.length})`),
       el("table", { class: "params" }, el("tbody", {}, ...params.map(([k, v]) => el("tr", {}, el("th", { scope: "row" }, k), el("td", { class: "mono" }, v))))));
   }
-  content.append(el("h3", {}, "Event"), kv([
-    ["Time", el("span", { title: utcTitle(e.timestamp_utc) }, e.timestamp_utc ? fmtFull(e.timestamp_utc) : "(invalid)")],
-    ["Time (UTC)", el("code", {}, e.timestamp_utc)],
-    ["Type", e.event_type], ["Title / term", e.title], ["Transition", e.transition], ["Detail", e.detail],
-    ["Browser", `${e.browser} ${e.browser_version || ""}`.trim()], ["Profile", e.profile],
-    ["Synced", e.is_synced ? "yes — made on another device" : "no"], ["Recovered", e.is_recovered ? "yes (partial)" : "no"],
-    ["Visit id / from", `${e.source_visit_id ?? "—"} / ${e.from_visit_id ?? "—"}`], ["Event id", e.event_id],
+  content.append(el("h3", {}, "Title"), el("p", {}, e.title || "—"));
+  content.append(el("h3", {}, "Transition"), kv([
+    ["Human-readable", humanizeTransition(e.transition) || "—"], ["Raw value", el("code", {}, e.transition || "—")],
   ]));
-  const raw = JSON.stringify(e, null, 2);
-  const src = data.source;
-  content.append(el("h3", {}, "Source record"), kv([
-    ["File", el("code", {}, src.file || "—")], ["SHA-256", el("code", {}, src.sha256 || "—")],
-    ["Record", el("code", {}, e.source_record_id || "—")], ["Evidence copy", el("code", {}, src.evidence_copy || "—")],
-    ["Verify with", src.query ? el("div", { class: "copy-row" }, el("code", {}, src.query), copyButton(src.query, "Copy SQL query")) : "—"],
-  ]), el("details", {}, el("summary", {}, "Raw stored record (JSON)"),
-    el("div", { class: "copy-row" }, el("pre", { class: "url-box mono" }, raw), copyButton(raw, "Copy raw record"))));
-  content.append(el("h3", {}, "Findings"), data.findings.length
-    ? el("ul", {}, ...data.findings.map((f) => el("li", {}, el("span", { class: `pill pill-${f.severity}` }, f.severity), ` ${f.rule_id} ${SHORT_TITLES[f.rule_id] || f.name}`)))
-    : el("p", { class: "empty" }, "Not linked to any finding."));
+  content.append(el("h3", {}, "Flags"), kv([
+    ["Synced", e.is_synced ? "yes — made on another device" : "no"], ["Recovered", e.is_recovered ? "yes (partial)" : "no"],
+    ["Visit id / from", `${e.source_visit_id ?? "—"} / ${e.from_visit_id ?? "—"}`],
+  ]));
   if (e.event_type === "visit") {
     const chainBox = el("div", {});
     content.append(el("h3", {}, "Navigation chain"), chainBox);
     chainBox.append(el("button", { type: "button", class: "ghost", onclick: () => loadChain(id, chainBox) }, "Show how the user got here"));
   }
+  const raw = JSON.stringify(e, null, 2);
+  const src = data.source;
+  content.append(el("h3", {}, "Source record"), kv([
+    ["File", el("code", {}, src.file || "—")], ["Record ID", el("code", {}, e.source_record_id || "—")],
+    ["SHA-256", el("div", { class: "copy-row" }, el("code", {}, src.sha256 || "—"), src.sha256 ? copyButton(src.sha256, "Copy SHA-256") : null)],
+    ["Evidence copy", el("code", {}, src.evidence_copy || "—")],
+    ["Verify with", src.query ? el("div", { class: "copy-row" }, el("code", {}, src.query), copyButton(src.query, "Copy SQL query")) : "—"],
+  ]), el("details", {}, el("summary", {}, "Raw stored record (JSON)"),
+    el("div", { class: "copy-row" }, el("pre", { class: "url-box mono" }, raw), copyButton(raw, "Copy raw record"))));
+  content.append(el("h3", {}, "Linked findings"), data.findings.length
+    ? el("ul", { style: "margin:0;padding-left:16px" }, ...data.findings.map((f) => el("li", {},
+      el("span", { class: `pill pill-${f.severity}` }, f.severity),
+      ` ${f.rule_id} ${SHORT_TITLES[f.rule_id] || f.name}`,
+      f.risk_level ? el("span", { class: "sub-line" }, `Analyst review: ${f.risk_level} · ${f.outcome} · confidence ${f.confidence}`) : null)))
+    : el("p", { class: "empty" }, "Not linked to any finding."));
   openDrawer(`Event ${e.event_id}`, content);
 }
 
 async function loadChain(id, box) {
   const data = await api(`/api/chain/${id}`);
   clear(box);
-  box.append(el("p", { class: "empty" }, `${data.chain.length} step(s), oldest first, from from_visit links in the same database.`),
+  box.append(el("p", { class: "empty" }, `${data.chain.length} step(s), oldest first.`),
     ...data.chain.map((e) => el("div", { class: `chain-step ${e.event_id === id ? "current" : ""}` },
-      el("div", {}, el("code", { title: utcTitle(e.timestamp_utc) }, fmtFull(e.timestamp_utc)), " · ", e.transition || e.event_type),
+      el("div", {}, el("code", { title: utcTitle(e.timestamp_utc) }, fmtFull(e.timestamp_utc)), " · ", humanizeTransition(e.transition) || e.event_type),
       el("div", {}, e.title || "(no title)"), el("div", { class: "ev-text" }, ...urlLine(e.url)))));
 }
 
 // ---------------------------------------------------------------- charts
-function valueLabelPlugin(id, labelFor) {
+function offHoursBandPlugin() {
   return {
-    id,
-    afterDatasetsDraw(chart) {
-      const { ctx } = chart;
-      const meta = chart.getDatasetMeta(0);
+    id: "offHoursBand",
+    beforeDatasetsDraw(chart) {
+      const hours = state.chartData && state.chartData.hours;
+      if (!hours) return;
+      const { ctx, chartArea, scales } = chart;
+      if (!chartArea) return;
       ctx.save();
-      ctx.font = "600 12px system-ui, sans-serif";
-      ctx.fillStyle = COLORS.label;
-      const horizontal = chart.options.indexAxis === "y";
-      ctx.textAlign = horizontal ? "left" : "center";
-      ctx.textBaseline = horizontal ? "middle" : "bottom";
-      meta.data.forEach((bar, i) => {
-        const text = labelFor(i, bar, chart);
-        if (!text) return;
-        if (horizontal) ctx.fillText(text, bar.x + 6, bar.y);
-        else ctx.fillText(text, bar.x, bar.y - 4);
-      });
+      ctx.fillStyle = COLORS.off;
+      for (let i = 0; i < hours.length; i++) {
+        if (!hours[i].off_hours) continue;
+        const x = scales.x.getPixelForValue(i);
+        const half = (scales.x.width / hours.length) / 2;
+        ctx.fillRect(x - half, chartArea.top, half * 2, chartArea.height);
+      }
       ctx.restore();
     },
   };
@@ -626,12 +844,13 @@ function legend(boxId, items) {
   }
 }
 
+function themeColor(name) {
+  return getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+}
+
 async function loadCharts() {
   if (typeof Chart === "undefined") return;
   state.chartData = await api("/api/charts", { tz: state.tz });
-  Chart.defaults.color = COLORS.tick;
-  Chart.defaults.font.family = "system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif";
-  Chart.defaults.font.size = 12;
   renderHoursChart();
   renderDomainsChart();
 }
@@ -642,29 +861,24 @@ function renderHoursChart() {
   const hours = d.hours;
   const counts = hours.map((h) => h.count);
   const total = d.total_events || 1;
-  const max = Math.max(0, ...counts);
-  const peak = max > 0 ? counts.indexOf(max) : -1;
-  const colors = hours.map((h, i) => (h.off_hours ? (i === peak ? COLORS.offPeak : COLORS.off) : (i === peak ? COLORS.barPeak : COLORS.bar)));
+  const grid = themeColor("--border"), tick = themeColor("--text-muted"), bar = themeColor("--accent");
+  Chart.defaults.color = tick;
+  Chart.defaults.font.family = "system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif";
+  Chart.defaults.font.size = 12;
   const w = d.off_hours;
-  const windowText = w ? `${w.rule_id} window ${w.start}–${w.end} ${tzLabel(w.timezone)}` : "no off-hours rule";
-  $("hours-sub").textContent = `${total.toLocaleString()} events by hour of day (${tzl}, all days combined). Click a bar to filter the timeline.`;
-  legend("hours-legend", [[COLORS.bar, "Normal hours"], [COLORS.off, `Off-hours (${windowText})`], [COLORS.barPeak, "Peak hour"]]);
-  const badge = $("peak-badge");
-  if (peak >= 0) { badge.hidden = false; badge.textContent = `Peak ${String(peak).padStart(2, "0")}:00 · ${max.toLocaleString()} events`; }
-  else badge.hidden = true;
+  $("hours-sub").textContent = `${total.toLocaleString()} events by hour of day, ${tzl}, all days combined`;
+  legend("hours-legend", w ? [[COLORS.off.replace("0.07", "0.4"), `Off-hours window (${w.start}–${w.end} ${tzLabel(w.timezone)})`]] : []);
 
   if (state.charts.hours) state.charts.hours.destroy();
   state.charts.hours = new Chart($("hours-chart"), {
     type: "bar",
     data: { labels: hours.map((h) => String(h.hour).padStart(2, "0")),
-      datasets: [{ label: "Events", data: counts, backgroundColor: colors, borderRadius: 3, maxBarThickness: 36 }] },
+      datasets: [{ label: "Events", data: counts, backgroundColor: bar, borderRadius: 3, maxBarThickness: 28 }] },
     options: {
       maintainAspectRatio: false, animation: false,
-      layout: { padding: { top: 18 } },
       scales: {
-        x: { title: { display: true, text: `Hour of day (${tzl}, 24h)` }, grid: { display: false } },
-        y: { title: { display: true, text: "Events" }, beginAtZero: true, suggestedMax: Math.ceil(max * 1.12) || 1,
-          grid: { color: COLORS.grid }, ticks: { precision: 0 } },
+        x: { grid: { display: false }, ticks: { color: tick } },
+        y: { beginAtZero: true, grid: { color: grid }, ticks: { precision: 0, color: tick } },
       },
       plugins: {
         legend: { display: false },
@@ -674,10 +888,9 @@ function renderHoursChart() {
             title: (items) => hourLabel(items[0].dataIndex),
             label: (item) => {
               const h = hours[item.dataIndex];
-              const lines = [`${h.count.toLocaleString()} events (${((100 * h.count) / total).toFixed(1)}% of all)`];
-              if (h.top_domain) lines.push(`Top domain: ${h.top_domain} (${h.top_domain_count})`);
-              lines.push(`Findings in this hour: ${h.findings}`);
-              if (h.off_hours) lines.push(`Inside off-hours window (${w ? w.rule_id : ""})`);
+              const lines = [`${h.count.toLocaleString()} events (${((100 * h.count) / total).toFixed(1)}%)`];
+              if (h.top_domain) lines.push(`Top domain: ${h.top_domain}`);
+              if (h.off_hours) lines.push("Inside off-hours window");
               return lines;
             },
             footer: () => "Click to filter the timeline",
@@ -687,13 +900,11 @@ function renderHoursChart() {
       onClick: (_evt, elements) => { if (elements.length) applyFilter("hour", elements[0].index); },
       onHover: (evt, elements) => { evt.native.target.style.cursor = elements.length ? "pointer" : "default"; },
     },
-    // value on top of every non-zero bar; on narrow screens only the peak is labelled
-    plugins: [valueLabelPlugin("hourValues", (i, _bar, chart) => (counts[i] && (chart.scales.x.width / 24 >= 21 || i === peak) ? counts[i].toLocaleString() : ""))],
+    plugins: [offHoursBandPlugin()],
   });
 }
 
 function truncate(s, n) { return s.length > n ? `${s.slice(0, n - 1)}…` : s; }
-// keep y-axis labels inside the canvas on narrow screens (full name is in the tooltip)
 function labelChars() { const w = $("domains-box").clientWidth; return w < 420 ? 14 : w < 640 ? 20 : 26; }
 
 function renderDomainsChart() {
@@ -706,23 +917,21 @@ function renderDomainsChart() {
   const rows = top.map((x) => ({ ...x, others: false }));
   if (othersVisits > 0) rows.push({ domain: `Others (${othersCount} domains)`, visits: othersVisits, others: true });
   const total = d.total_visits || 1;
-  $("domains-sub").textContent = `Counts history visit events — every page load, including repeats — not unique pages. `
-    + `${d.total_visits.toLocaleString()} visits of ${d.total_events.toLocaleString()} events (searches/downloads excluded).`;
-  legend("domains-legend", [[COLORS.domain, "Domain"], [COLORS.domainFinding, "Linked to a finding (off-hours sessions not counted)"], [COLORS.others, "Others"]]);
+  const grid = themeColor("--border"), tick = themeColor("--text-muted"), bar = themeColor("--accent"), others = themeColor("--text-muted");
+  $("domains-sub").textContent = `${d.total_visits.toLocaleString()} history visit events (searches/downloads excluded), top ${top.length} of ${d.domain_count} domains`;
+  legend("domains-legend", []);
 
-  $("domains-box").style.height = `${Math.max(220, rows.length * 28 + 70)}px`;
   if (state.charts.domains) state.charts.domains.destroy();
   state.charts.domains = new Chart($("domains-chart"), {
     type: "bar",
     data: { labels: rows.map((r) => r.domain),
-      datasets: [{ label: "Visits", data: rows.map((r) => r.visits), borderRadius: 3, barThickness: 18,
-        backgroundColor: rows.map((r) => (r.others ? COLORS.others : r.findings ? COLORS.domainFinding : COLORS.domain)) }] },
+      datasets: [{ label: "Visits", data: rows.map((r) => r.visits), borderRadius: 3, barThickness: 16,
+        backgroundColor: rows.map((r) => (r.others ? others : bar)) }] },
     options: {
       indexAxis: "y", maintainAspectRatio: false, animation: false,
-      layout: { padding: { right: 96 } },
       scales: {
-        y: { grid: { display: false }, ticks: { autoSkip: false, color: COLORS.label, callback: (v, i) => truncate(rows[i].domain, labelChars()) } },
-        x: { beginAtZero: true, title: { display: true, text: "Visits" }, grid: { color: COLORS.grid }, ticks: { precision: 0 } },
+        y: { grid: { display: false }, ticks: { autoSkip: false, color: tick, callback: (v, i) => truncate(rows[i].domain, labelChars()) } },
+        x: { beginAtZero: true, grid: { color: grid }, ticks: { precision: 0, color: tick } },
       },
       plugins: {
         legend: { display: false },
@@ -732,11 +941,9 @@ function renderDomainsChart() {
             title: (items) => rows[items[0].dataIndex].domain,
             label: (item) => {
               const r = rows[item.dataIndex];
-              const lines = [`${r.visits.toLocaleString()} visits (${((100 * r.visits) / total).toFixed(1)}% of visits)`];
+              const lines = [`${r.visits.toLocaleString()} visits (${((100 * r.visits) / total).toFixed(1)}%)`];
               if (r.others) return lines;
-              lines.push(`Unique URLs: ${r.unique_urls.toLocaleString()}`,
-                `First seen: ${fmtFull(r.first_seen)}`, `Last seen: ${fmtFull(r.last_seen)}`,
-                `Linked findings: ${r.findings}${r.context_findings ? ` (+${r.context_findings} off-hours session${r.context_findings === 1 ? "" : "s"})` : ""}`);
+              lines.push(`Unique URLs: ${r.unique_urls.toLocaleString()}`, `Linked findings: ${r.findings}`);
               return lines;
             },
             footer: (items) => (rows[items[0].dataIndex].others ? "" : "Click to filter the timeline"),
@@ -750,42 +957,117 @@ function renderDomainsChart() {
       },
       onHover: (evt, elements) => { evt.native.target.style.cursor = elements.length && !rows[elements[0].index].others ? "pointer" : "default"; },
     },
-    plugins: [valueLabelPlugin("domainValues", (i) => `${rows[i].visits.toLocaleString()} · ${Math.round((100 * rows[i].visits) / total)}%`)],
   });
+}
+
+// ---------------------------------------------------------------- evidence tab
+async function loadEvidence() {
+  const data = await api("/api/evidence");
+  const body = $("evidence-body");
+  clear(body);
+  for (const f of data.files) {
+    body.append(el("tr", {},
+      el("td", {}, browserIdLabel(f.browser)), el("td", {}, f.profile || "—"),
+      el("td", { class: "mono" }, f.original_path || "—"),
+      el("td", {}, f.size_bytes != null ? `${(f.size_bytes / 1024).toFixed(1)} KB` : "—"),
+      el("td", { class: "mono" }, f.sha256_original || "—"), el("td", { class: "mono" }, f.sha256_copy || "—"),
+      el("td", {}, el("span", { class: f.status === "ok" ? "status-ok" : "status-bad" }, f.status === "ok" ? "Verified" : f.status))));
+  }
+  if (!data.files.length) body.append(el("tr", {}, el("td", { colspan: "7", class: "empty" }, "No evidence files recorded.")));
+
+  const custodyBody = $("custody-body");
+  clear(custodyBody);
+  for (const c of data.custody_log) {
+    custodyBody.append(el("tr", {},
+      el("td", {}, c.timestamp_utc || "—"), el("td", { class: "mono" }, c.original_path || "—"),
+      el("td", { class: "mono" }, c.copy_path || "—"),
+      el("td", {}, el("span", { class: c.match ? "status-ok" : "status-bad" }, c.match ? "Match" : "No match")),
+      el("td", {}, c.note || "—")));
+  }
+  if (!data.custody_log.length) custodyBody.append(el("tr", {}, el("td", { colspan: "5", class: "empty" }, "No custody log entries.")));
+
+  const auditBody = $("audit-body");
+  clear(auditBody);
+  for (const a of data.audit_log) {
+    auditBody.append(el("tr", {}, el("td", {}, a.timestamp_utc || "—"), el("td", {}, a.level || "—"),
+      el("td", {}, a.action || "—"), el("td", {}, a.detail || "—")));
+  }
+  if (!data.audit_log.length) auditBody.append(el("tr", {}, el("td", { colspan: "4", class: "empty" }, "No audit log entries.")));
+}
+
+async function verifyAgain() {
+  const btn = $("verify-again");
+  btn.disabled = true;
+  btn.textContent = "Verifying…";
+  try {
+    await apiUpdate("/api/evidence/verify", undefined, "POST");
+    await loadEvidence();
+    const data = await api("/api/case");
+    renderEvidenceBadge(data.verification || {}, data.evidence_files || []);
+  } catch (err) {
+    console.error(err);
+  } finally {
+    btn.disabled = false;
+    btn.textContent = "Verify again";
+  }
 }
 
 // ---------------------------------------------------------------- wiring
 function wire() {
+  for (const btn of document.querySelectorAll(".tab[data-tab]")) {
+    btn.addEventListener("click", () => goToTab(btn.dataset.tab));
+  }
+  window.addEventListener("hashchange", () => goToTab(location.hash.slice(1), { push: false }));
+
+  $("priority-view-all").addEventListener("click", () => goToTab("findings"));
+
   $("filters").addEventListener("submit", (ev) => {
     ev.preventDefault();
     const f = readFilters();
     if (!f) return;
-    // a manual search ends "show linked events of finding X"
-    if (state.filters.finding !== undefined && JSON.stringify(f) !== JSON.stringify(state.filters)) {
-      delete f.finding; state.activeFinding = null;
-      document.querySelectorAll(".finding.active").forEach((n) => n.classList.remove("active"));
-    }
+    delete f.finding;
     state.filters = f;
     state.offset = 0;
     loadEvents().catch(showError);
   });
+  $("f-q").addEventListener("input", () => {
+    clearTimeout(searchDebounce);
+    searchDebounce = setTimeout(() => $("filters").requestSubmit(), 250);
+  });
   $("f-reset").addEventListener("click", resetAll);
-  $("sort").addEventListener("change", (e) => { state.sort = e.target.value; renderFindings(); });
-  $("topn").addEventListener("change", (e) => { state.topN = +e.target.value; renderDomainsChart(); });
+  $("sort").addEventListener("change", (e) => { state.sort = e.target.value; renderFindingsList(); });
+
+  $("kebab-btn").addEventListener("click", (e) => {
+    e.stopPropagation();
+    const menu = $("kebab-menu");
+    const open = menu.hidden;
+    menu.hidden = !open;
+    $("kebab-btn").setAttribute("aria-expanded", String(open));
+  });
+  document.addEventListener("click", (e) => {
+    if (!$("kebab-menu").hidden && !e.target.closest(".toolbar-kebab")) { $("kebab-menu").hidden = true; $("kebab-btn").setAttribute("aria-expanded", "false"); }
+  });
+
+  $("verify-again").addEventListener("click", verifyAgain);
+  for (const btn of document.querySelectorAll("#evidence-subtabs .tab[data-subtab]")) {
+    btn.addEventListener("click", () => {
+      for (const b of document.querySelectorAll("#evidence-subtabs .tab")) b.setAttribute("aria-selected", String(b === btn));
+      $("evidence-sub-custody").hidden = btn.dataset.subtab !== "custody";
+      $("evidence-sub-audit").hidden = btn.dataset.subtab !== "audit";
+    });
+  }
+
   $("drawer-close").addEventListener("click", closeDrawer);
   document.addEventListener("keydown", (e) => { if (e.key === "Escape") closeDrawer(); });
-  $("rail-toggle").addEventListener("click", (e) => {
-    const collapsed = $("rail").classList.toggle("collapsed");
-    e.currentTarget.textContent = collapsed ? "Show" : "Hide";
-    e.currentTarget.setAttribute("aria-expanded", String(!collapsed));
-  });
   const toTop = $("to-top");
   window.addEventListener("scroll", () => { toTop.hidden = window.scrollY < 600; }, { passive: true });
   toTop.addEventListener("click", () => window.scrollTo({ top: 0 }));
-  // keep the sticky table header just below the sticky toolbar
-  const setToolbarH = () => document.documentElement.style.setProperty("--toolbar-h", `${$("toolbar").offsetHeight}px`);
-  new ResizeObserver(setToolbarH).observe($("toolbar"));
-  setToolbarH();
+  const setHeights = () => {
+    document.documentElement.style.setProperty("--toolbar-h", `${($("toolbar") || {}).offsetHeight || 0}px`);
+    document.documentElement.style.setProperty("--topbar-h", `${($("topbar") || {}).offsetHeight || 0}px`);
+  };
+  new ResizeObserver(setHeights).observe($("topbar"));
+  setHeights();
   let resizeTimer = null;
   window.addEventListener("resize", () => {
     clearTimeout(resizeTimer);
@@ -810,8 +1092,9 @@ function panelError(boxId, what, err) {
 }
 
 window.addEventListener("DOMContentLoaded", async () => {
+  initTheme();
   wire();
-  // Each panel loads independently so one failing request can't blank the whole page.
+  goToTab(location.hash.slice(1) || "overview", { push: false });
   try { await loadCase(); } catch (err) { panelError("case-info", "case details", err); }
   await Promise.all([
     loadStats().catch((err) => panelError("cards", "summary", err)),

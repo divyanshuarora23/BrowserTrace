@@ -22,7 +22,7 @@ EVENT_COLUMNS = [
     "from_event_id", "source_file", "source_sha256", "source_record_id",
 ]
 TIMESKETCH_COLUMNS = ["message", "datetime", "timestamp", "timestamp_desc"]
-CSV_COLUMNS = TIMESKETCH_COLUMNS + EVENT_COLUMNS + ["finding_rule_ids"]
+CSV_COLUMNS = TIMESKETCH_COLUMNS + EVENT_COLUMNS + ["finding_rule_ids", "finding_review_json"]
 
 TIMESTAMP_DESC = {
     "visit": "Last Visited Time",
@@ -51,9 +51,23 @@ def _finding_map(conn: sqlite3.Connection) -> dict[int, str]:
     return {k: ",".join(sorted(set(v))) for k, v in out.items()}
 
 
+def _finding_review_map(conn: sqlite3.Connection) -> dict[int, str]:
+    by_event: dict[int, list[dict]] = {}
+    rows = conn.execute(
+        "SELECT fe.event_id, f.id AS finding_id, f.rule_id, f.severity AS rule_severity, "
+        "r.reviewed_by, r.risk_level, r.outcome, r.rationale, r.confidence, r.reviewed_utc "
+        "FROM finding_events fe JOIN findings f ON f.id = fe.finding_id "
+        "JOIN finding_reviews r ON r.finding_id = f.id ORDER BY fe.event_id, f.id"
+    )
+    for row in rows:
+        by_event.setdefault(row["event_id"], []).append(dict(row))
+    return {event_id: json.dumps(reviews, ensure_ascii=False) for event_id, reviews in by_event.items()}
+
+
 def iter_export_rows(conn: sqlite3.Connection):
     conn.row_factory = sqlite3.Row
     fmap = _finding_map(conn)
+    review_map = _finding_review_map(conn)
     for r in conn.execute("SELECT * FROM events ORDER BY timestamp_utc, event_id"):
         ev = dict(r)
         ts = ev["timestamp_utc"] or ""
@@ -68,6 +82,7 @@ def iter_export_rows(conn: sqlite3.Connection):
             "timestamp_desc": TIMESTAMP_DESC.get(ev["event_type"], ev["event_type"]),
             **{c: ev.get(c) for c in EVENT_COLUMNS},
             "finding_rule_ids": fmap.get(ev["event_id"], ""),
+            "finding_review_json": review_map.get(ev["event_id"], ""),
         }
         row["is_synced"] = bool(row["is_synced"])
         row["is_recovered"] = bool(row["is_recovered"])
@@ -101,6 +116,8 @@ def export_json_obj(conn: sqlite3.Connection) -> dict:
     findings = []
     for f in conn.execute("SELECT * FROM findings ORDER BY id"):
         f = dict(f)
+        review = conn.execute("SELECT * FROM finding_reviews WHERE finding_id = ?", (f["id"],)).fetchone()
+        f["review"] = dict(review) if review else None
         f["event_ids"] = [r[0] for r in conn.execute(
             "SELECT event_id FROM finding_events WHERE finding_id = ? ORDER BY event_id", (f["id"],))]
         findings.append(f)

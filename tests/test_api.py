@@ -138,3 +138,22 @@ def test_csv_export_with_display_timezone(client):
     text = client.get("/api/export.csv", params={"tz": "Asia/Kolkata"}).text
     header, first = text.splitlines()[:2]
     assert header.endswith("datetime_local,local_timezone") and "+05:30,Asia/Kolkata" in first
+
+
+def test_json_export(client):
+    r = client.get("/api/export.json")
+    assert r.headers["content-type"].startswith("application/json")
+    data = r.json()
+    assert data["disclaimer"] and data["events"] and data["findings"]
+    assert {"evidence_files", "custody_log", "stats", "case"} <= data.keys()
+
+
+def test_evidence_endpoint_and_reverify(client):
+    e = client.get("/api/evidence").json()
+    assert e["files"] and all(f["status"] == "ok" for f in e["files"])
+    assert all(f["size_bytes"] and f["size_bytes"] > 0 for f in e["files"])
+    assert e["custody_log"] and e["audit_log"] is not None
+    r = client.post("/api/evidence/verify")
+    assert r.status_code == 200
+    reverified = r.json()
+    assert reverified["all_ok"] is True and all(f["status"] == "ok" for f in reverified["files"])

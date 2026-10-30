@@ -1,5 +1,14 @@
 # Changelog
 
+## Unreleased
+
+### Added
+- Analyst review annotations for findings: separate risk level, outcome, confidence, rationale,
+  optional reviewer name and UTC review time. Dashboard filters by review status; reviews appear in
+  CSV, JSON and PDF exports.
+- Local same-origin review updates recorded in the case audit log; exact unchanged findings retain
+  their review during re-analysis.
+
 ## 0.1.0 — initial version
 
 ### Added

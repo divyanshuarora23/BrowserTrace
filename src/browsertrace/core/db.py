@@ -6,6 +6,8 @@ opens the same file read-only.
 
 from __future__ import annotations
 
+import hashlib
+import json
 import sqlite3
 from collections.abc import Iterable
 from dataclasses import dataclass
@@ -85,6 +87,16 @@ CREATE TABLE IF NOT EXISTS finding_events (
     PRIMARY KEY (finding_id, event_id)
 );
 
+CREATE TABLE IF NOT EXISTS finding_reviews (
+    finding_id INTEGER PRIMARY KEY REFERENCES findings(id) ON DELETE CASCADE,
+    reviewed_by TEXT NOT NULL DEFAULT '',
+    risk_level TEXT NOT NULL CHECK (risk_level IN ('Low', 'Medium', 'High', 'Unclear')),
+    outcome TEXT NOT NULL CHECK (outcome IN ('Concerning', 'Benign', 'Needs more context')),
+    rationale TEXT NOT NULL DEFAULT '',
+    confidence TEXT NOT NULL CHECK (confidence IN ('Low', 'Medium', 'High')),
+    reviewed_utc TEXT NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS audit_log (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     timestamp_utc TEXT,
@@ -121,10 +133,17 @@ class CaseDB:
         self.path = Path(path)
         self.conn = sqlite3.connect(str(self.path))
         self.conn.row_factory = sqlite3.Row
+        self.conn.execute("PRAGMA foreign_keys=ON")
         register_sql_functions(self.conn)
         self.conn.execute("PRAGMA journal_mode=WAL;")
         self.conn.executescript(SCHEMA_SQL)
         self.conn.commit()
+        self._pending_reviews: dict[str, list[dict]] = {}
+
+    @staticmethod
+    def _finding_fingerprint(rule_id: str, name: str, severity: str, reason: str, event_ids: list[int]) -> str:
+        payload = json.dumps([rule_id, name, severity, reason, sorted(set(event_ids))], ensure_ascii=False)
+        return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
     def close(self) -> None:
         self.conn.close()
@@ -277,6 +296,19 @@ class CaseDB:
 
     # ---- findings ----------------------------------------------------------
     def clear_findings(self) -> None:
+        self._pending_reviews = {}
+        rows = self.conn.execute(
+            "SELECT f.id, f.rule_id, f.name, f.severity, f.reason, r.reviewed_by, r.risk_level, "
+            "r.outcome, r.rationale, r.confidence, r.reviewed_utc "
+            "FROM findings f JOIN finding_reviews r ON r.finding_id = f.id"
+        ).fetchall()
+        for row in rows:
+            event_ids = [r[0] for r in self.conn.execute(
+                "SELECT event_id FROM finding_events WHERE finding_id = ?", (row["id"],)
+            )]
+            key = self._finding_fingerprint(row["rule_id"], row["name"], row["severity"], row["reason"], event_ids)
+            self._pending_reviews.setdefault(key, []).append({k: row[k] for k in (
+                "reviewed_by", "risk_level", "outcome", "rationale", "confidence", "reviewed_utc")})
         self.conn.execute("DELETE FROM finding_events")
         self.conn.execute("DELETE FROM findings")
         self.conn.commit()
@@ -293,6 +325,18 @@ class CaseDB:
             "INSERT OR IGNORE INTO finding_events (finding_id, event_id) VALUES (?, ?)",
             [(finding_id, eid) for eid in event_ids],
         )
+        fingerprint = self._finding_fingerprint(rule_id, name, severity, reason, event_ids)
+        retained = self._pending_reviews.get(fingerprint)
+        if retained:
+            review = retained.pop(0)
+            if not retained:
+                del self._pending_reviews[fingerprint]
+            self.conn.execute(
+                "INSERT INTO finding_reviews (finding_id, reviewed_by, risk_level, outcome, rationale, confidence, reviewed_utc) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (finding_id, review["reviewed_by"], review["risk_level"], review["outcome"], review["rationale"],
+                 review["confidence"], review["reviewed_utc"]),
+            )
         self.conn.commit()
         return finding_id
 
@@ -316,6 +360,26 @@ class CaseDB:
         ]
         finding["event_ids"] = event_ids
         return finding
+
+    def save_finding_review(self, finding_id: int, *, reviewed_by: str, risk_level: str, outcome: str,
+                            rationale: str, confidence: str) -> dict:
+        """Insert or replace the current analyst review for one finding."""
+        reviewed_utc = now_utc_iso()
+        self.conn.execute(
+            "INSERT INTO finding_reviews (finding_id, reviewed_by, risk_level, outcome, rationale, confidence, reviewed_utc) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?) "
+            "ON CONFLICT(finding_id) DO UPDATE SET reviewed_by=excluded.reviewed_by, "
+            "risk_level=excluded.risk_level, outcome=excluded.outcome, rationale=excluded.rationale, "
+            "confidence=excluded.confidence, reviewed_utc=excluded.reviewed_utc",
+            (finding_id, reviewed_by, risk_level, outcome, rationale, confidence, reviewed_utc),
+        )
+        self.conn.execute(
+            "INSERT INTO audit_log (timestamp_utc, action, detail, level) VALUES (?, ?, ?, ?)",
+            (reviewed_utc, "finding-review", f"finding_id={finding_id}; outcome={outcome}; risk={risk_level}", "info"),
+        )
+        self.conn.commit()
+        row = self.conn.execute("SELECT * FROM finding_reviews WHERE finding_id = ?", (finding_id,)).fetchone()
+        return dict(row)
 
     def all_events_ordered(self) -> list[dict]:
         rows = self.conn.execute("SELECT * FROM events ORDER BY timestamp_utc").fetchall()
@@ -444,10 +508,17 @@ def open_readonly(path: Path) -> sqlite3.Connection:
     return conn
 
 
+def ensure_case_schema(path: Path) -> None:
+    """Apply additive case-schema changes before a read-only consumer opens the DB."""
+    with CaseDB(Path(path)):
+        pass
+
+
 __all__ = [
     "CaseDB",
     "IngestStats",
     "open_readonly",
+    "ensure_case_schema",
     "query_events",
     "count_events",
     "case_stats",

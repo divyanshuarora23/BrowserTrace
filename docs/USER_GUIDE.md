@@ -40,13 +40,24 @@ The case folder receives `case.db` and `evidence/<browser>/<profile>/` with the 
 browsertrace serve --case <CASE_DIR> [--port 8000]
 ```
 
-Open <http://127.0.0.1:8000>. The server listens on localhost only and is read-only.
+Open <http://127.0.0.1:8000>. The server listens on localhost only. It reads case evidence and
+allows the dashboard to save analyst review annotations to the case database.
+Older case databases receive an additive review-table migration when opened; evidence copies are not changed.
 
 - **Header:** case, examiner, tool version, and a badge showing whether all evidence copies still
   match their recorded hashes (hover for details).
 - **Cards:** event totals per browser, findings per severity, synced events.
-- **Findings:** sorted High → Low with reason and ATT&CK ID. Click one to jump to its events in the
-  timeline (they're highlighted and tagged FINDING).
+- **Findings:** sorted High → Low with reason and ATT&CK ID. Filter by rule severity and review
+  status (all / not reviewed / reviewed). Click one to jump to its events in the timeline (they're
+  highlighted and tagged FINDING).
+- **Analyst review:** expand **Add analyst review** on a finding and choose a separate risk level
+  (Low / Medium / High / Unclear), outcome (Concerning / Benign / Needs more context), confidence,
+  and a rationale. The dashboard shows a working guide: isolated/contextual signals are Low, a
+  specific or related signal with context missing is Medium, and multiple independent time-linked
+  signals may be High; off-hours alone is not High. Reviewer name is optional. Save again to edit the
+  current review. Rule severity stays unchanged; it remains the rule engine's original result. Review saves are recorded in the
+  case audit log and carry forward on re-analysis only when the rule, severity, reason and linked event IDs
+  remain identical. Reviewer names are free text, not authenticated identities.
 - **Timeline:** server-side paginated; filter by text, browser, type, synced/local and UTC date
   range. Browser colours: Chrome blue, Edge green, Firefox orange, Brave red, Opera purple.
   `SYNCED` = the visit was made on another device signed into the same account (Chromium only).
@@ -65,10 +76,13 @@ browsertrace report --case <CASE_DIR> --format json [--out file.json]
 ```
 
 - **PDF:** cover, evidence table with both hashes, methodology, executive summary, findings with up
-  to 5 linked events each, timeline excerpt around High findings, limitations, signature block.
+  to 5 linked events each, current analyst review and rationale, timeline excerpt around High findings,
+  limitations, signature block.
 - **CSV:** Timesketch columns (`message`, `datetime`, `timestamp`, `timestamp_desc`) followed by all
-  BrowserTrace fields and the IDs of rules that flagged each event. Import directly into Timesketch.
-- **JSON:** case metadata, evidence, custody log, findings with event IDs, and all events.
+  BrowserTrace fields, rule IDs and a `finding_review_json` column containing any review attached to
+  each event's findings. Import directly into Timesketch.
+- **JSON:** case metadata, evidence, custody log, findings with event IDs and a `review` object (or
+  `null` when not reviewed), and all events.
 
 ## 5. Verify evidence integrity later
 

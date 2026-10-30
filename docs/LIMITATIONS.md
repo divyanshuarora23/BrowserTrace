@@ -45,6 +45,16 @@ must be checked against the source record it links to, and against other evidenc
   Baidu, Ecosia, YouTube) and from Chromium `keyword_search_terms`.
 - Severity escalation (off-hours + another rule) is a prioritisation heuristic.
 
+## Analyst review
+- Review labels are manual annotations attached to a finding. They do not alter rule severity,
+  establish that an event was malicious, or constitute a validated training set by themselves.
+- Reviewer names are free text and are not authenticated identities. The current review is stored;
+  save actions are added to the case audit log, but BrowserTrace does not keep a full version history
+  of prior rationale text.
+- A review is carried forward on re-analysis only when the finding's rule, severity, reason and linked
+  event IDs match exactly. Changed findings need to be reviewed again.
+- This version does not assign analyst risk labels automatically and does not call an AI service.
+
 ## Acquisition
 - Files locked by a running browser are retried, then reported. Acquire from a forensic image or a
   Volume Shadow Copy instead of a live, running profile where possible.

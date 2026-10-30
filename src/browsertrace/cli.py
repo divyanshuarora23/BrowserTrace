@@ -41,12 +41,13 @@ def main(
 
 
 def _open_case(case: Path) -> sqlite3.Connection:
-    from browsertrace.core.db import open_readonly
+    from browsertrace.core.db import ensure_case_schema, open_readonly
     from browsertrace.pipeline import case_db_path
 
     db = case_db_path(case)
     if not db.is_file():
         _fail(f"no case database found at {db}. Run 'browsertrace analyze ... --out {case}' first.")
+    ensure_case_schema(db)
     return open_readonly(db)
 
 

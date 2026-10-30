@@ -147,3 +147,21 @@ def test_verify_detects_tampering(tmp_path):
         statuses = {r["copy_path"]: r["status"] for r in verify_case_evidence(db.conn, case)}
     assert statuses["evidence/Edge/Default/History"] == "MODIFIED"
     assert list(statuses.values()).count("ok") == 5
+
+
+def test_verify_ignores_stale_custody_rows_from_a_rerun(tmp_path):
+    # Re-running analyze on the same case folder (e.g. to pick up newer browser activity)
+    # appends a new custody_log row per file without deleting the old one. The old row's
+    # recorded hash no longer matches the file on disk (the second run legitimately
+    # overwrote it) and must not be reported as tampering.
+    paths = _tree(tmp_path / "ev")
+    case = tmp_path / "case"
+    analyze(tmp_path / "ev", case, "C1", "tester")
+    with open(paths["edge"], "ab") as fh:
+        fh.write(b"more legitimate browsing")
+    analyze(tmp_path / "ev", case, "C1", "tester")
+    with CaseDB(case / "case.db") as db:
+        assert db.conn.execute("SELECT COUNT(*) FROM custody_log WHERE copy_path = 'evidence/Edge/Default/History'").fetchone()[0] == 2
+        results = verify_case_evidence(db.conn, case)
+    statuses = [r["status"] for r in results if r["copy_path"] == "evidence/Edge/Default/History"]
+    assert statuses == ["ok"]  # only the latest row is checked, and it matches the current file

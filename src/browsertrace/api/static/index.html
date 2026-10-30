@@ -3,99 +3,100 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <meta name="color-scheme" content="dark">
   <title>BrowserTrace</title>
   <link rel="stylesheet" href="/static/style.css">
   <script src="/static/chart.min.js" defer></script>
   <script src="/static/app.js" defer></script>
 </head>
 <body>
-  <a class="skip-link" href="#timeline">Skip to timeline</a>
+  <a class="skip-link" href="#timeline-panel">Skip to timeline</a>
 
-  <header class="topbar">
-    <div class="brand">BrowserTrace</div>
+  <header class="topbar" id="topbar">
+    <div class="brand">
+      <span class="brand-name">BrowserTrace</span>
+      <span class="brand-version" id="brand-version"></span>
+    </div>
     <div class="case-info" id="case-info">Loading case…</div>
     <div class="topbar-right">
-      <div class="tz-switch" id="tz-switch" role="group" aria-label="Display timezone"></div>
-      <span id="verify-badge" class="badge badge-muted" tabindex="0">Hashes: checking…</span>
+      <div class="evidence-badge" id="evidence-badge">
+        <button type="button" id="evidence-badge-btn" aria-haspopup="true" aria-expanded="false">Hashes: checking…</button>
+      </div>
+      <div class="seg-group" id="tz-switch" role="group" aria-label="Display timezone"></div>
+      <button type="button" class="icon-toggle ghost" id="theme-toggle" aria-pressed="false" title="Toggle dark theme">Dark</button>
     </div>
   </header>
 
-  <div class="banner" role="note">
-    <span class="banner-icon" aria-hidden="true">i</span>
-    <span>Findings are investigative leads produced by rules, not proof. Verify every lead against its source record.</span>
-    <span class="banner-tz" id="tz-note"></span>
-  </div>
+  <nav class="tabs" id="tabs" role="tablist" aria-label="Sections">
+    <button type="button" class="tab" role="tab" data-tab="overview" aria-selected="true">Overview</button>
+    <button type="button" class="tab" role="tab" data-tab="findings" aria-selected="false">Findings</button>
+    <button type="button" class="tab" role="tab" data-tab="timeline" aria-selected="false">Timeline</button>
+    <button type="button" class="tab" role="tab" data-tab="evidence" aria-selected="false">Evidence</button>
+    <button type="button" class="tab" role="tab" data-tab="report" aria-selected="false">Report</button>
+  </nav>
 
-  <main class="page">
-    <section class="stat-grid" id="cards" aria-label="Summary"></section>
+  <main>
+    <!-- ======================= OVERVIEW ======================= -->
+    <section class="tabpanel active" id="panel-overview" role="tabpanel" aria-labelledby="tab-overview">
+      <section class="stat-grid" id="cards" aria-label="Summary"></section>
 
-    <section class="overview" aria-labelledby="overview-h">
-      <h2 class="section-title" id="overview-h">Overview</h2>
-      <div class="chart-grid">
-        <article class="card chart-card" aria-labelledby="hours-h">
-          <div class="card-head">
-            <div class="card-head-text">
-              <h3 id="hours-h">Activity by hour
-                <button class="info-btn" type="button" aria-label="About this chart"
-                        title="Every event (visit, search, download) counted by the hour of day it happened in the selected timezone, summed over all days. Click a bar to filter the timeline to that hour.">i</button>
-              </h3>
-              <p class="sub" id="hours-sub">All events by hour of day.</p>
+      <section class="overview-charts" aria-labelledby="overview-charts-h">
+        <h2 class="section-title" id="overview-charts-h">Activity</h2>
+        <div class="chart-grid">
+          <article class="card chart-card" aria-labelledby="hours-h">
+            <h3 id="hours-h">Activity by hour</h3>
+            <p class="chart-unit" id="hours-sub">Events per hour of day</p>
+            <div class="chart-box" id="hours-box">
+              <canvas id="hours-chart" role="img" aria-label="Bar chart of events per hour of day"></canvas>
             </div>
-            <span class="peak-badge" id="peak-badge" hidden></span>
-          </div>
-          <div class="legend" id="hours-legend"></div>
-          <div class="chart-box" id="hours-box">
-            <canvas id="hours-chart" role="img" aria-label="Bar chart of events per hour of day"></canvas>
-          </div>
-        </article>
+            <div class="chart-legend" id="hours-legend"></div>
+          </article>
 
-        <article class="card chart-card" aria-labelledby="domains-h">
-          <div class="card-head">
-            <div class="card-head-text">
-              <h3 id="domains-h">Top domains (visits)
-                <button class="info-btn" type="button" aria-label="About this chart"
-                        title="Counts history visit events (every page load, including repeat visits), not unique pages. Searches and downloads are not included. Click a bar to filter the timeline to that domain.">i</button>
-              </h3>
-              <p class="sub" id="domains-sub">History visit events per domain.</p>
+          <article class="card chart-card" aria-labelledby="domains-h">
+            <h3 id="domains-h">Top domains</h3>
+            <p class="chart-unit" id="domains-sub">Visits per domain</p>
+            <div class="chart-box" id="domains-box">
+              <canvas id="domains-chart" role="img" aria-label="Horizontal bar chart of visits per domain"></canvas>
             </div>
-            <label class="inline-select">Show
-              <select id="topn" aria-label="Number of domains to show">
-                <option value="10">Top 10</option>
-                <option value="15" selected>Top 15</option>
-                <option value="25">Top 25</option>
-              </select>
-            </label>
-          </div>
-          <div class="legend" id="domains-legend"></div>
-          <div class="chart-box chart-box-domains" id="domains-box">
-            <canvas id="domains-chart" role="img" aria-label="Horizontal bar chart of visits per domain"></canvas>
-          </div>
-        </article>
-      </div>
+            <div class="chart-legend" id="domains-legend"></div>
+          </article>
+        </div>
+      </section>
+
+      <section aria-labelledby="priority-h">
+        <div class="section-head">
+          <h2 class="section-title" id="priority-h">Priority findings</h2>
+          <button type="button" class="link-btn" id="priority-view-all">View all findings</button>
+        </div>
+        <div class="card" style="padding: 12px;">
+          <div class="priority-list" id="priority-list"></div>
+        </div>
+      </section>
     </section>
 
-    <div class="main-area">
-      <aside class="card rail" id="rail" aria-labelledby="findings-h">
-        <div class="rail-head">
-          <div class="rail-title">
-            <h2 id="findings-h">Findings (<span id="findings-count">0</span>)</h2>
-            <button type="button" class="ghost small narrow-only" id="rail-toggle" aria-expanded="true" aria-controls="findings">Hide</button>
-          </div>
-          <div class="rail-controls">
-            <div class="chips" id="sev-chips" role="group" aria-label="Filter findings by severity"></div>
-            <label class="inline-select">Sort
+    <!-- ======================= FINDINGS ======================= -->
+    <section class="tabpanel" id="panel-findings" role="tabpanel" aria-labelledby="tab-findings" hidden>
+      <div class="findings-layout">
+        <div class="findings-master">
+          <div class="findings-filterbar">
+            <div class="seg-group" id="sev-chips" role="group" aria-label="Filter findings by severity"></div>
+            <label class="field" style="flex-direction: row; align-items: center; gap: 6px;">Sort
               <select id="sort" aria-label="Sort findings">
                 <option value="severity">Severity</option>
                 <option value="time">Time</option>
               </select>
             </label>
           </div>
+          <div class="findings-list" id="findings"></div>
         </div>
-        <div class="findings" id="findings"></div>
-      </aside>
+        <article class="card findings-detail" id="finding-detail" aria-live="polite">
+          <p class="empty-state">Select a finding from the list to see its details.</p>
+        </article>
+      </div>
+    </section>
 
-      <section class="card timeline" id="timeline" aria-labelledby="timeline-h" tabindex="-1">
+    <!-- ======================= TIMELINE ======================= -->
+    <section class="tabpanel" id="panel-timeline" role="tabpanel" aria-labelledby="tab-timeline" hidden>
+      <div class="card timeline" id="timeline-panel" tabindex="-1">
         <div class="toolbar" id="toolbar">
           <form class="filters" id="filters" autocomplete="off">
             <h2 class="sr-only" id="timeline-h">Timeline</h2>
@@ -117,13 +118,18 @@
               <input id="f-from" type="text" inputmode="numeric" placeholder="YYYY-MM-DD HH:MM" aria-label="From date and time (24h)">
               <span aria-hidden="true">to</span>
               <input id="f-to" type="text" inputmode="numeric" placeholder="YYYY-MM-DD HH:MM" aria-label="To date and time (24h)">
-              <span class="tz-tag" id="range-tz">UTC</span>
             </span>
-            <button type="submit">Apply</button>
+            <button type="submit" class="primary">Apply</button>
             <button type="button" class="ghost" id="f-reset">Reset</button>
-            <span class="spacer"></span>
-            <a class="button ghost" id="export-csv" href="/api/export.csv">Export CSV</a>
-            <a class="button ghost" href="/api/report.pdf" title="Times in the PDF report are UTC">PDF report</a>
+            <span class="spacer" style="flex:1"></span>
+            <div class="toolbar-kebab">
+              <button type="button" class="ghost" id="kebab-btn" aria-haspopup="true" aria-expanded="false">⋯ Export</button>
+              <div class="kebab-menu" id="kebab-menu" hidden>
+                <a id="export-csv" href="/api/export.csv">Export CSV</a>
+                <a href="/api/report.pdf">PDF report</a>
+                <a href="/api/export.json">Export JSON</a>
+              </div>
+            </div>
           </form>
           <div class="chip-row" id="active-chips" aria-live="polite"></div>
         </div>
@@ -139,11 +145,80 @@
           <tbody id="timeline-body"></tbody>
         </table>
         <div class="pager" id="pager-bottom"></div>
-      </section>
-    </div>
+      </div>
+    </section>
+
+    <!-- ======================= EVIDENCE ======================= -->
+    <section class="tabpanel" id="panel-evidence" role="tabpanel" aria-labelledby="tab-evidence" hidden>
+      <div class="section-head">
+        <h2 class="section-title" id="evidence-h">Evidence files</h2>
+        <button type="button" class="ghost" id="verify-again">Verify again</button>
+      </div>
+      <div class="card" style="overflow-x:auto;">
+        <table class="data-table" id="evidence-table">
+          <thead><tr><th>Browser</th><th>Profile</th><th>Original path</th><th>Size</th><th>SHA-256 (original)</th><th>SHA-256 (copy)</th><th>Status</th></tr></thead>
+          <tbody id="evidence-body"></tbody>
+        </table>
+      </div>
+
+      <div class="subtabs" id="evidence-subtabs" role="tablist" aria-label="Evidence logs" style="margin-top: 24px;">
+        <button type="button" class="tab" role="tab" data-subtab="custody" aria-selected="true">Custody log</button>
+        <button type="button" class="tab" role="tab" data-subtab="audit" aria-selected="false">Audit log</button>
+      </div>
+      <div class="card" id="evidence-sub-custody" style="overflow-x:auto;">
+        <table class="data-table" id="custody-table">
+          <thead><tr><th>Time (UTC)</th><th>Original</th><th>Copy</th><th>Match</th><th>Note</th></tr></thead>
+          <tbody id="custody-body"></tbody>
+        </table>
+      </div>
+      <div class="card" id="evidence-sub-audit" hidden style="overflow-x:auto;">
+        <table class="data-table" id="audit-table">
+          <thead><tr><th>Time (UTC)</th><th>Level</th><th>Action</th><th>Detail</th></tr></thead>
+          <tbody id="audit-body"></tbody>
+        </table>
+      </div>
+    </section>
+
+    <!-- ======================= REPORT ======================= -->
+    <section class="tabpanel" id="panel-report" role="tabpanel" aria-labelledby="tab-report" hidden>
+      <h2 class="section-title">Export</h2>
+      <div class="report-grid">
+        <article class="card report-card">
+          <h3>PDF report</h3>
+          <p>A printable summary of the case, findings and evidence hashes. Times are UTC.</p>
+          <a class="button primary" href="/api/report.pdf">Download PDF</a>
+        </article>
+        <article class="card report-card">
+          <h3>CSV export</h3>
+          <p>All events as rows, with UTC and local-timezone timestamp columns, for spreadsheets or Timesketch.</p>
+          <a class="button primary" id="report-export-csv" href="/api/export.csv">Download CSV</a>
+        </article>
+        <article class="card report-card">
+          <h3>JSON export</h3>
+          <p>The full case — events, findings, evidence and custody log — as one machine-readable file.</p>
+          <a class="button primary" href="/api/export.json">Download JSON</a>
+        </article>
+      </div>
+
+      <h2 class="section-title" style="margin-top: 32px;">Case metadata</h2>
+      <div class="card" style="padding: 16px; max-width: 640px;">
+        <dl class="kv" id="report-case-meta"></dl>
+      </div>
+
+      <h2 class="section-title" style="margin-top: 32px;">Limitations</h2>
+      <p class="limitations">
+        Findings are investigative leads produced by automated rules, not proof of wrongdoing. Each must be verified
+        against its linked source events before being relied on. Rules can miss activity (false negatives) and can
+        flag innocent activity (false positives); off-hours activity, file-sharing visits and similar signals are
+        context, not conclusions. Timestamps are only as accurate as the browser's own clock at the time of the
+        event.
+      </p>
+    </section>
   </main>
 
-  <button type="button" class="to-top" id="to-top" hidden aria-label="Back to top">↑ Top</button>
+  <button type="button" class="to-top ghost" id="to-top" hidden aria-label="Back to top">↑ Top</button>
+
+  <footer class="footer-note">Findings are investigative leads, not proof. Verify every lead against its source record.</footer>
 
   <aside class="drawer" id="drawer" hidden role="dialog" aria-labelledby="drawer-title">
     <div class="drawer-head">

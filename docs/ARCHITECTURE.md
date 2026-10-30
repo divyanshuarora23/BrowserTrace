@@ -18,7 +18,7 @@ enrichment/zone_identifier.py    Mark-of-the-Web for downloads still present in 
 analysis/engine.py + rules/*.yaml  findings (reason + linked event IDs), off-hours escalation
    ▼
 case.db ──► cli.py (summary / timeline / verify)
-        ──► api/app.py (read-only FastAPI) + static dashboard
+        ──► api/app.py (read-only evidence API + local review updates) + static dashboard
         ──► report/pdf.py, report/export.py (CSV/JSON)
 ```
 
@@ -36,9 +36,12 @@ Evidence copy paths are stored **relative to the case folder** so a case can be 
 
 ## Database tables
 
-`case_meta`, `evidence_files`, `events`, `findings`, `finding_events`, `audit_log`, `custody_log`.
+`case_meta`, `evidence_files`, `events`, `findings`, `finding_events`, `finding_reviews`, `audit_log`,
+`custody_log`.
 Indexes on `events(timestamp_utc)`, `events(url)`, `events(event_type)` and
-`events(source_file, source_visit_id)` (chain resolution). The API opens the DB with `mode=ro`.
+`events(source_file, source_visit_id)` (chain resolution). Evidence and event endpoints open the DB
+with `mode=ro`; review saves use a separate write connection for the annotation tables. The dashboard
+and CLI apply this additive table migration when opening cases created by older versions.
 
 ## Design decisions (made without asking, per the brief)
 
@@ -70,13 +73,18 @@ Indexes on `events(timestamp_utc)`, `events(url)`, `events(event_type)` and
 9. **R006 combines two signals** — a >48 h gap with ≥10 events in the 72 h before *and* after, and
    ≥20 missing visit IDs — and merges them when they border the same pair of events.
 10. **Dashboard security:** strict CSP (`script-src 'self'`, no inline script/style), all evidence
-    strings rendered as text nodes, server bound to 127.0.0.1 only, API has GET endpoints only.
+    strings rendered as text nodes, server bound to 127.0.0.1 only. The only write route saves a
+    finding review and requires a local same-origin `Origin`; evidence and event records are unchanged.
 11. **Chart.js 4.4.1** is vendored as `api/static/chart.min.js` so the dashboard works offline.
 12. **WAL recovery not implemented** (build step 12); R006 covers history-clearing detection instead.
 13. **The scenario generator lives in `browsertrace/scenario.py`** so `browsertrace demo` works from an
     installed package; `tools/make_scenario.py` is a thin CLI wrapper.
 14. **Firefox `moz_annos`** is the real table name (`moz_annotations` from the brief is also accepted),
     and Chromium's `downloads_url_chains` (the brief's `download_url_chains` is also accepted).
+15. **Analyst reviews are separate from rule findings.** Each finding can have one current review
+    (risk level, outcome, confidence, rationale, optional reviewer and UTC review time). Review values
+    do not change rule severity. Exact matching findings retain their review when analysis is rerun;
+    changed findings require a new review.
 
 ## Extending
 

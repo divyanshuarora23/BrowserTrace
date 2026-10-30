@@ -9,10 +9,13 @@ from collections import Counter, defaultdict
 from contextlib import contextmanager
 from datetime import datetime, time
 from pathlib import Path
+from typing import Literal
+from urllib.parse import urlsplit
 
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.responses import FileResponse, PlainTextResponse, Response
 from fastapi.staticfiles import StaticFiles
+from pydantic import BaseModel, Field
 
 from browsertrace.analysis.engine import (
     RuleError,
@@ -23,16 +26,24 @@ from browsertrace.analysis.engine import (
     parse_tz,
 )
 from browsertrace.collector.collect import verify_case_evidence
-from browsertrace.core.db import case_stats, count_events, open_readonly, query_events, url_domain
+from browsertrace.core.db import CaseDB, case_stats, count_events, open_readonly, query_events, url_domain
 from browsertrace.core.timeutil import parse_iso
 from browsertrace.enrichment.chains import get_chain
 from browsertrace.pipeline import case_db_path
-from browsertrace.report.export import export_csv_text
+from browsertrace.report.export import export_csv_text, export_json_obj
 from browsertrace.report.pdf import build_pdf
 from browsertrace.version import __version__
 
 STATIC_DIR = Path(__file__).parent / "static"
 MAX_LIMIT = 1000
+
+
+class FindingReviewInput(BaseModel):
+    reviewed_by: str = Field(default="", max_length=120)
+    risk_level: Literal["Low", "Medium", "High", "Unclear"]
+    outcome: Literal["Concerning", "Benign", "Needs more context"]
+    rationale: str = Field(min_length=1, max_length=2000)
+    confidence: Literal["Low", "Medium", "High"]
 
 CSP = (
     "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; "
@@ -53,6 +64,10 @@ def create_app(case_dir: Path) -> FastAPI:
     if not db_path.is_file():
         raise FileNotFoundError(f"no case database at {db_path}; run 'browsertrace analyze' first")
 
+    # Apply additive schema updates for case databases created by earlier versions.
+    with CaseDB(db_path):
+        pass
+
     app = FastAPI(title="BrowserTrace", version=__version__, docs_url="/api/docs", redoc_url=None)
     verification: dict = {}
 
@@ -64,7 +79,9 @@ def create_app(case_dir: Path) -> FastAPI:
         finally:
             c.close()
 
-    def _verify() -> dict:
+    def _verify(*, force: bool = False) -> dict:
+        if force:
+            verification.clear()
         if not verification:
             with conn() as c:
                 results = verify_case_evidence(c, case_dir)
@@ -98,6 +115,37 @@ def create_app(case_dir: Path) -> FastAPI:
     def stats():
         with conn() as c:
             return case_stats(c)
+
+    def _evidence_payload(v: dict) -> dict:
+        by_copy = {r["copy_path"]: r for r in v.get("files", [])}
+        with conn() as c:
+            files = []
+            # Re-running collection on the same case folder adds a new row per target each
+            # time; only the latest row per copy_path reflects the file as it is on disk now.
+            for row in c.execute(
+                "SELECT e.* FROM evidence_files e JOIN "
+                "(SELECT copy_path, MAX(id) AS id FROM evidence_files GROUP BY copy_path) latest "
+                "ON latest.copy_path = e.copy_path AND latest.id = e.id ORDER BY e.id"
+            ):
+                row = dict(row)
+                result = by_copy.get(row["copy_path"], {})
+                copy_file = Path(row["copy_path"] or "")
+                if not copy_file.is_absolute():
+                    copy_file = case_dir / copy_file
+                row["size_bytes"] = copy_file.stat().st_size if copy_file.is_file() else None
+                row["status"] = result.get("status", "unknown")
+                files.append(row)
+            custody_log = [dict(r) for r in c.execute("SELECT * FROM custody_log ORDER BY id")]
+            audit_log = [dict(r) for r in c.execute("SELECT * FROM audit_log ORDER BY id")]
+        return {"files": files, "custody_log": custody_log, "audit_log": audit_log, "all_ok": v.get("all_ok", False)}
+
+    @app.get("/api/evidence")
+    def evidence():
+        return _evidence_payload(_verify())
+
+    @app.post("/api/evidence/verify")
+    def evidence_verify():
+        return _evidence_payload(_verify(force=True))
 
     @app.get("/api/events")
     def events(
@@ -144,9 +192,11 @@ def create_app(case_dir: Path) -> FastAPI:
     def findings():
         with conn() as c:
             rows = [dict(r) for r in c.execute(
-                "SELECT f.*, COUNT(e.event_id) AS event_count, MIN(e.timestamp_utc) AS first_time, "
+                "SELECT f.*, r.reviewed_by, r.risk_level, r.outcome, r.rationale, r.confidence, r.reviewed_utc, "
+                "COUNT(e.event_id) AS event_count, MIN(e.timestamp_utc) AS first_time, "
                 "MAX(e.timestamp_utc) AS last_time "
                 "FROM findings f LEFT JOIN finding_events fe ON fe.finding_id = f.id "
+                "LEFT JOIN finding_reviews r ON r.finding_id = f.id "
                 "LEFT JOIN events e ON e.event_id = fe.event_id GROUP BY f.id "
                 "ORDER BY CASE f.severity WHEN 'High' THEN 0 WHEN 'Medium' THEN 1 ELSE 2 END, f.id")]
             for f in rows:
@@ -157,7 +207,11 @@ def create_app(case_dir: Path) -> FastAPI:
     @app.get("/api/findings/{finding_id}")
     def finding(finding_id: int):
         with conn() as c:
-            row = c.execute("SELECT * FROM findings WHERE id = ?", (finding_id,)).fetchone()
+            row = c.execute(
+                "SELECT f.*, r.reviewed_by, r.risk_level, r.outcome, r.rationale, r.confidence, r.reviewed_utc "
+                "FROM findings f LEFT JOIN finding_reviews r ON r.finding_id = f.id WHERE f.id = ?",
+                (finding_id,),
+            ).fetchone()
             if not row:
                 raise HTTPException(404, "finding not found")
             f = dict(row)
@@ -165,6 +219,29 @@ def create_app(case_dir: Path) -> FastAPI:
                 "SELECT e.* FROM finding_events fe JOIN events e ON e.event_id = fe.event_id "
                 "WHERE fe.finding_id = ? ORDER BY e.timestamp_utc", (finding_id,))]
         return f
+
+    @app.put("/api/findings/{finding_id}/review")
+    def save_finding_review(finding_id: int, review: FindingReviewInput, request: Request):
+        origin = request.headers.get("origin")
+        parsed_origin = urlsplit(origin) if origin else None
+        if (parsed_origin is None or parsed_origin.scheme != "http"
+                or parsed_origin.hostname not in {"127.0.0.1", "localhost"}):
+            raise HTTPException(403, "review updates must come from the local BrowserTrace page")
+        rationale = review.rationale.strip()
+        if not rationale:
+            raise HTTPException(422, "rationale cannot be blank")
+        with CaseDB(db_path) as db:
+            if not db.get_finding(finding_id):
+                raise HTTPException(404, "finding not found")
+            saved = db.save_finding_review(
+                finding_id,
+                reviewed_by=review.reviewed_by.strip(),
+                risk_level=review.risk_level,
+                outcome=review.outcome,
+                rationale=rationale,
+                confidence=review.confidence,
+            )
+        return saved
 
     @app.get("/api/chain/{event_id}")
     def chain(event_id: int):
@@ -187,7 +264,9 @@ def create_app(case_dir: Path) -> FastAPI:
                 (ev["source_file"], ev["source_sha256"]),
             ).fetchone()
             findings_ = [dict(r) for r in c.execute(
-                "SELECT f.id, f.rule_id, f.severity, f.name FROM finding_events fe JOIN findings f ON f.id = fe.finding_id "
+                "SELECT f.id, f.rule_id, f.severity, f.name, r.risk_level, r.outcome, r.confidence "
+                "FROM finding_events fe JOIN findings f ON f.id = fe.finding_id "
+                "LEFT JOIN finding_reviews r ON r.finding_id = f.id "
                 "WHERE fe.event_id = ?", (event_id,))]
         return {
             "event": ev,
@@ -335,6 +414,13 @@ def create_app(case_dir: Path) -> FastAPI:
             text = export_csv_text(c, tz_name=tz, zone=_check_tz(tz) if tz else None)
         return PlainTextResponse(text, media_type="text/csv",
                                  headers={"Content-Disposition": 'attachment; filename="browsertrace_events.csv"'})
+
+    @app.get("/api/export.json")
+    def export_json():
+        with conn() as c:
+            payload = export_json_obj(c)
+        return Response(json.dumps(payload, indent=2, default=str), media_type="application/json",
+                         headers={"Content-Disposition": 'attachment; filename="browsertrace_export.json"'})
 
     @app.get("/api/report.pdf")
     def report_pdf():

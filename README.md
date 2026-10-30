@@ -19,6 +19,8 @@ and produces a PDF report and Timesketch-compatible CSV/JSON exports.
 - **Rules (YAML):** file-sharing sites, risky downloads, off-hours activity, anti-forensic searches,
   share-then-archive sequences, history gaps, anonymizers, download bursts — with MITRE ATT&CK IDs
   and off-hours severity escalation.
+- **Analyst review:** record a separate risk level, outcome, confidence and rationale for each finding.
+  Reviews stay attached to the finding and are included in CSV, JSON and PDF outputs.
 - **Outputs:** terminal summary/timeline, dashboard, PDF report, CSV/JSON.
 
 ## Install
@@ -62,7 +64,7 @@ See [docs/USER_GUIDE.md](docs/USER_GUIDE.md) for every command and option.
 | Command | What it does |
 |---|---|
 | `analyze` | collect → parse → normalize → store → enrich → rules, prints a summary (`--timeline N` prints rows) |
-| `serve` | dashboard on 127.0.0.1 only |
+| `serve` | dashboard on 127.0.0.1 only; supports local analyst review annotations |
 | `report` | `--format pdf\|csv\|json` |
 | `timeline` | print timeline rows in the terminal |
 | `demo` | build the synthetic scenario and analyze it |

@@ -124,7 +124,9 @@ def build_pdf(conn: sqlite3.Connection, out: Path) -> Path:
     stats = case_stats(conn)
     evidence = [dict(r) for r in conn.execute("SELECT * FROM evidence_files ORDER BY id")]
     findings = [dict(r) for r in conn.execute(
-        "SELECT * FROM findings ORDER BY CASE severity WHEN 'High' THEN 0 WHEN 'Medium' THEN 1 ELSE 2 END, id")]
+        "SELECT f.*, r.reviewed_by, r.risk_level, r.outcome, r.rationale, r.confidence, r.reviewed_utc "
+        "FROM findings f LEFT JOIN finding_reviews r ON r.finding_id = f.id "
+        "ORDER BY CASE f.severity WHEN 'High' THEN 0 WHEN 'Medium' THEN 1 ELSE 2 END, f.id")]
     try:
         notes = json.loads(meta.get("notes") or "{}")
     except json.JSONDecodeError:
@@ -190,6 +192,7 @@ def build_pdf(conn: sqlite3.Connection, out: Path) -> Path:
         ["Synced events (from another device)", stats["synced_events"]],
         ["Recovered (partial) events", stats["recovered_events"]],
         ["Findings", f"High {sev.get('High', 0)}, Medium {sev.get('Medium', 0)}, Low {sev.get('Low', 0)}"],
+        ["Analyst-reviewed findings", conn.execute("SELECT COUNT(*) FROM finding_reviews").fetchone()[0]],
     ]
     story.append(_table([[_p(a, ss["Cell"]), _p(b, ss["Cell"])] for a, b in summary_rows], [60 * mm, 110 * mm],
                         header=False))
@@ -215,7 +218,16 @@ def build_pdf(conn: sqlite3.Connection, out: Path) -> Path:
                 _p(f"{e['browser']}/{e['profile']}", ss["Cell"]), _p(e["event_type"], ss["Cell"]),
                 _p2(e["url"], e["title"], ss["Cell"]), _p(e["source_record_id"], ss["CellMono"]),
             ])
-        block = [head, _p(f["reason"], ss["BodyText"]), Spacer(1, 2 * mm),
+        review_text = (
+            f"Analyst review: {f['risk_level']} risk · {f['outcome']} · "
+            f"confidence {f['confidence']} (reviewed {f['reviewed_utc']}" +
+            (f" by {f['reviewed_by']}" if f["reviewed_by"] else "") + ")."
+            if f.get("risk_level") else "Analyst review: Not reviewed."
+        )
+        block = [head, _p(f["reason"], ss["BodyText"]), _p(review_text, ss["Small"])]
+        if f.get("rationale"):
+            block.append(_p(f"Review rationale: {f['rationale']}", ss["BodyText"]))
+        block += [Spacer(1, 2 * mm),
                  _table(rows, [12 * mm, 30 * mm, 26 * mm, 16 * mm, 66 * mm, 24 * mm])]
         if total > len(evs):
             block.append(_p(f"... {total - len(evs)} more linked event(s) in the case database.", ss["Small"]))
@@ -256,8 +268,9 @@ def build_pdf(conn: sqlite3.Connection, out: Path) -> Path:
 
     # ---- signature
     story += [Spacer(1, 12 * mm), _p("7. Examiner declaration", ss["Heading1"]),
-              _p("I confirm that this report was produced with the tool and method described above and that the "
-                 "findings were reviewed by me against the source records.", ss["BodyText"]), Spacer(1, 15 * mm)]
+              _p("I confirm that this report was produced with the tool and method described above. Analyst "
+                 "review annotations, where present, record my assessment; rule findings remain investigative "
+                 "leads that should be checked against the source records.", ss["BodyText"]), Spacer(1, 15 * mm)]
     story.append(_table([["Examiner name:", meta.get("examiner", "")], ["Signature:", ""], ["Date:", ""]],
                         [40 * mm, 100 * mm], header=False))
 
