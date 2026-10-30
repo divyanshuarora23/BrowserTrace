@@ -1,0 +1,46 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "browsertrace"
+version = "0.1.0"
+description = "Windows browser forensic triage tool (CLI + local dashboard) for Digital Forensics coursework."
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "MIT" }
+authors = [{ name = "BrowserTrace project" }]
+dependencies = [
+    "fastapi>=0.110",
+    "uvicorn>=0.29",
+    "pyyaml>=6.0",
+    "reportlab>=4.0",
+    "typer>=0.12",
+    # Windows ships no IANA time-zone database; zoneinfo needs this for --tz Asia/Kolkata etc.
+    "tzdata>=2024.1",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8.0", "ruff>=0.4", "httpx>=0.27"]
+
+[project.scripts]
+browsertrace = "browsertrace.cli:app"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+"browsertrace.analysis" = ["rules/*.yaml"]
+"browsertrace.api" = ["static/*"]
+
+[tool.ruff]
+line-length = 110
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "W"]
+ignore = ["E501"]
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+testpaths = ["tests"]

@@ -1,0 +1,156 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="dark">
+  <title>BrowserTrace</title>
+  <link rel="stylesheet" href="/static/style.css">
+  <script src="/static/chart.min.js" defer></script>
+  <script src="/static/app.js" defer></script>
+</head>
+<body>
+  <a class="skip-link" href="#timeline">Skip to timeline</a>
+
+  <header class="topbar">
+    <div class="brand">BrowserTrace</div>
+    <div class="case-info" id="case-info">Loading case…</div>
+    <div class="topbar-right">
+      <div class="tz-switch" id="tz-switch" role="group" aria-label="Display timezone"></div>
+      <span id="verify-badge" class="badge badge-muted" tabindex="0">Hashes: checking…</span>
+    </div>
+  </header>
+
+  <div class="banner" role="note">
+    <span class="banner-icon" aria-hidden="true">i</span>
+    <span>Findings are investigative leads produced by rules, not proof. Verify every lead against its source record.</span>
+    <span class="banner-tz" id="tz-note"></span>
+  </div>
+
+  <main class="page">
+    <section class="stat-grid" id="cards" aria-label="Summary"></section>
+
+    <section class="overview" aria-labelledby="overview-h">
+      <h2 class="section-title" id="overview-h">Overview</h2>
+      <div class="chart-grid">
+        <article class="card chart-card" aria-labelledby="hours-h">
+          <div class="card-head">
+            <div class="card-head-text">
+              <h3 id="hours-h">Activity by hour
+                <button class="info-btn" type="button" aria-label="About this chart"
+                        title="Every event (visit, search, download) counted by the hour of day it happened in the selected timezone, summed over all days. Click a bar to filter the timeline to that hour.">i</button>
+              </h3>
+              <p class="sub" id="hours-sub">All events by hour of day.</p>
+            </div>
+            <span class="peak-badge" id="peak-badge" hidden></span>
+          </div>
+          <div class="legend" id="hours-legend"></div>
+          <div class="chart-box" id="hours-box">
+            <canvas id="hours-chart" role="img" aria-label="Bar chart of events per hour of day"></canvas>
+          </div>
+        </article>
+
+        <article class="card chart-card" aria-labelledby="domains-h">
+          <div class="card-head">
+            <div class="card-head-text">
+              <h3 id="domains-h">Top domains (visits)
+                <button class="info-btn" type="button" aria-label="About this chart"
+                        title="Counts history visit events (every page load, including repeat visits), not unique pages. Searches and downloads are not included. Click a bar to filter the timeline to that domain.">i</button>
+              </h3>
+              <p class="sub" id="domains-sub">History visit events per domain.</p>
+            </div>
+            <label class="inline-select">Show
+              <select id="topn" aria-label="Number of domains to show">
+                <option value="10">Top 10</option>
+                <option value="15" selected>Top 15</option>
+                <option value="25">Top 25</option>
+              </select>
+            </label>
+          </div>
+          <div class="legend" id="domains-legend"></div>
+          <div class="chart-box chart-box-domains" id="domains-box">
+            <canvas id="domains-chart" role="img" aria-label="Horizontal bar chart of visits per domain"></canvas>
+          </div>
+        </article>
+      </div>
+    </section>
+
+    <div class="main-area">
+      <aside class="card rail" id="rail" aria-labelledby="findings-h">
+        <div class="rail-head">
+          <div class="rail-title">
+            <h2 id="findings-h">Findings (<span id="findings-count">0</span>)</h2>
+            <button type="button" class="ghost small narrow-only" id="rail-toggle" aria-expanded="true" aria-controls="findings">Hide</button>
+          </div>
+          <div class="rail-controls">
+            <div class="chips" id="sev-chips" role="group" aria-label="Filter findings by severity"></div>
+            <label class="inline-select">Sort
+              <select id="sort" aria-label="Sort findings">
+                <option value="severity">Severity</option>
+                <option value="time">Time</option>
+              </select>
+            </label>
+          </div>
+        </div>
+        <div class="findings" id="findings"></div>
+      </aside>
+
+      <section class="card timeline" id="timeline" aria-labelledby="timeline-h" tabindex="-1">
+        <div class="toolbar" id="toolbar">
+          <form class="filters" id="filters" autocomplete="off">
+            <h2 class="sr-only" id="timeline-h">Timeline</h2>
+            <input id="f-q" type="search" placeholder="Search URL or title" aria-label="Search URL or title">
+            <select id="f-browser" aria-label="Browser"><option value="">All browsers</option></select>
+            <select id="f-type" aria-label="Event type">
+              <option value="">All types</option>
+              <option value="visit">Visit</option>
+              <option value="search">Search</option>
+              <option value="download">Download</option>
+              <option value="deleted_visit">Deleted visit</option>
+            </select>
+            <select id="f-synced" aria-label="Source">
+              <option value="">Any source</option>
+              <option value="false">Local only</option>
+              <option value="true">Synced only</option>
+            </select>
+            <span class="range">
+              <input id="f-from" type="text" inputmode="numeric" placeholder="YYYY-MM-DD HH:MM" aria-label="From date and time (24h)">
+              <span aria-hidden="true">to</span>
+              <input id="f-to" type="text" inputmode="numeric" placeholder="YYYY-MM-DD HH:MM" aria-label="To date and time (24h)">
+              <span class="tz-tag" id="range-tz">UTC</span>
+            </span>
+            <button type="submit">Apply</button>
+            <button type="button" class="ghost" id="f-reset">Reset</button>
+            <span class="spacer"></span>
+            <a class="button ghost" id="export-csv" href="/api/export.csv">Export CSV</a>
+            <a class="button ghost" href="/api/report.pdf" title="Times in the PDF report are UTC">PDF report</a>
+          </form>
+          <div class="chip-row" id="active-chips" aria-live="polite"></div>
+        </div>
+
+        <div class="pager" id="pager-top"></div>
+        <table class="tl">
+          <colgroup>
+            <col class="c-time"><col class="c-browser"><col class="c-type"><col class="c-title"><col class="c-url"><col class="c-detail">
+          </colgroup>
+          <thead>
+            <tr><th scope="col" id="th-time">Time</th><th scope="col">Browser</th><th scope="col">Type</th><th scope="col">Title / term / file</th><th scope="col">URL</th><th scope="col"><span class="sr-only">Details</span></th></tr>
+          </thead>
+          <tbody id="timeline-body"></tbody>
+        </table>
+        <div class="pager" id="pager-bottom"></div>
+      </section>
+    </div>
+  </main>
+
+  <button type="button" class="to-top" id="to-top" hidden aria-label="Back to top">↑ Top</button>
+
+  <aside class="drawer" id="drawer" hidden role="dialog" aria-labelledby="drawer-title">
+    <div class="drawer-head">
+      <h2 id="drawer-title">Details</h2>
+      <button type="button" class="ghost" id="drawer-close" aria-label="Close details">Close</button>
+    </div>
+    <div id="drawer-body"></div>
+  </aside>
+</body>
+</html>

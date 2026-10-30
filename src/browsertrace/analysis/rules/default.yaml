@@ -1,0 +1,140 @@
+# BrowserTrace default rules.
+#
+# Rules produce INVESTIGATIVE LEADS, not proof. Every finding states the reason it fired
+# and links the exact events that triggered it, so an examiner can check it.
+#
+# Schema (validated on load):
+#   id, name, severity (Low|Medium|High), attack (MITRE ATT&CK ID or "none"),
+#   type (domain_match|keyword_match|extension_match|time_window|sequence|gap|burst),
+#   type-specific params, reason (template).
+# Reason placeholders: {domain} {url} {term} {time} {file} {delta} {count}
+
+rules:
+  - id: R001
+    name: File-sharing / paste / cloud-transfer site visited
+    severity: Medium
+    attack: T1567
+    type: domain_match
+    event_types: [visit, download]
+    domains:
+      - pastebin.com
+      - transfer.sh
+      - mega.nz
+      - mega.io
+      - wetransfer.com
+      - anonfiles.com
+      - file.io
+      - gofile.io
+      - dropbox.com/upload
+      - drive.google.com/upload
+      - 0x0.st
+      - sendspace.com
+      - mediafire.com
+    reason: >-
+      {count} event(s) involving {domain}, a file-sharing/paste/transfer service that can be used
+      to move data out of an organisation, first at {time} ({url}).
+
+  - id: R002
+    name: Download of executable / archive / script
+    severity: Medium
+    attack: T1105
+    type: extension_match
+    event_types: [download]
+    extensions: [.exe, .msi, .zip, .rar, .7z, .iso, .ps1, .bat, .vbs, .js, .jar]
+    reason: >-
+      Downloaded {file} at {time} from {url}. Executables, archives and scripts are common
+      carriers for tools brought onto, or data packed up on, a system.
+
+  - id: R003
+    name: Activity in off-hours window
+    severity: Low
+    attack: none
+    type: time_window
+    start: "00:00"
+    end: "05:00"
+    session_gap_minutes: 30
+    event_types: [visit, search, download]
+    reason: >-
+      {count} browser event(s) in the off-hours window ({window}, {tz}) starting at {time}.
+      Unusual working hours are context, not wrongdoing on their own.
+
+  - id: R004
+    name: Search for hiding or deleting evidence
+    severity: High
+    attack: T1070
+    type: keyword_match
+    event_types: [search]
+    keywords:
+      - clear history
+      - delete browsing history
+      - delete history
+      - wipe
+      - shred
+      - secure delete
+      - vpn bypass
+      - hide files
+      - anti forensic
+      - antiforensic
+      - delete logs
+      - incognito history
+      - cclean
+    reason: >-
+      Search for "{term}" at {time} matches anti-forensic keyword "{keyword}". This may
+      indicate intent to remove traces of activity.
+
+  - id: R005
+    name: File-share visit followed by archive download
+    severity: High
+    attack: T1567
+    type: sequence
+    first_rule: R001
+    then_event_types: [download]
+    then_extensions: [.zip, .rar, .7z, .tar, .gz, .tgz]
+    within_minutes: 10
+    reason: >-
+      Visit to {domain} was followed {delta} later by the download of archive {file}
+      (at {time}). A transfer-site visit directly followed by an archive download is a
+      common data-staging/exfiltration pattern.
+
+  - id: R006
+    name: History gap (possible clearing)
+    severity: High
+    attack: T1070.004
+    type: gap
+    gap_hours: 48
+    context_hours: 72
+    min_events_around: 10
+    min_missing_ids: 20
+    reason: >-
+      {browser}/{profile}: {gap_detail}, starting after {time}, inside an otherwise active
+      period. This is consistent with history being deleted, but can also have innocent
+      causes (holiday, browser not used, history expiry).
+
+  - id: R007
+    name: Anonymizer / VPN / Tor download or search
+    severity: Medium
+    attack: T1090
+    type: keyword_match
+    event_types: [search, download]
+    fields: [title, url]
+    keywords:
+      - torproject.org
+      - tor browser
+      - protonvpn
+      - nordvpn
+      - expressvpn
+      - tails
+    reason: >-
+      {event_type} at {time} matches anonymizer/VPN keyword "{keyword}" ({term}).
+
+  - id: R008
+    name: Download burst
+    severity: Medium
+    attack: T1074
+    type: burst
+    event_types: [download]
+    count: 5
+    window_minutes: 10
+    reason: >-
+      {count} downloads within {delta} starting at {time}. Bulk downloading in a short
+      window can indicate data collection/staging.
