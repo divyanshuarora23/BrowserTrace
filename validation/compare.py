@@ -306,7 +306,7 @@ def render_hindsight_report(args, comparisons: dict, ref_stats: dict) -> str:
         f"- BrowserTrace CSV: `{args.browsertrace}`",
         f"- Hindsight JSONL: `{args.reference}`",
         f"- Match rule: same browser, profile and normalized URL; timestamps within {args.tolerance:g} seconds.",
-        f"- Hindsight download rows collapsed by profile and download ID; the first row for each ID is retained.",
+        "- Hindsight download rows collapsed by profile and download ID; the first row for each ID is retained.",
         f"- Generated: {datetime.now(timezone.utc).isoformat(timespec='seconds')}", "",
         "## Results", "", "| Artifact | BrowserTrace | Hindsight | Matched | Only BrowserTrace | Only Hindsight | Mean / max Δt (s) |",
         "|---|---:|---:|---:|---:|---:|---:|",
